@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { transcribeWithXfyun } from '@/lib/stt/xfyun';
 
 // Lets the deployed environment be checked from a browser/curl without
 // exposing the key values themselves — mainly to confirm whether an env var
@@ -6,6 +7,7 @@ import { NextRequest, NextResponse } from 'next/server';
 // effect after a redeploy, which otherwise requires reading server logs.
 export async function GET() {
   return NextResponse.json({
+    xfyunConfigured: Boolean(process.env.XFYUN_APP_ID && process.env.XFYUN_API_SECRET),
     groqConfigured: Boolean(process.env.GROQ_API_KEY),
     openaiConfigured: Boolean(process.env.OPENAI_API_KEY),
   });
@@ -36,6 +38,24 @@ export async function POST(request: NextRequest) {
         error: 'We couldn\'t detect your voice. Please try again.',
         stage: 'local-size-check',
         audioBytes: audioBlob.size,
+      });
+    }
+
+    // Prefer iFlytek (讯飞) — reachable from mainland-China-hosted servers,
+    // unlike Groq/OpenAI which returned a bare 403 from this app's actual
+    // hosting environment (see src/lib/stt/xfyun.ts for the full story).
+    if (process.env.XFYUN_APP_ID && process.env.XFYUN_API_SECRET) {
+      const uploadedName = audioBlob instanceof File ? audioBlob.name : 'recording.webm';
+      const xfyunResult = await transcribeWithXfyun(audioBlob, uploadedName);
+      if ('transcript' in xfyunResult) {
+        return NextResponse.json({ transcript: xfyunResult.transcript });
+      }
+      return NextResponse.json({
+        error: xfyunResult.error,
+        stage: xfyunResult.stage,
+        provider: 'xfyun',
+        providerDetail: xfyunResult.detail,
+        raw: xfyunResult.raw,
       });
     }
 
