@@ -14,14 +14,18 @@ import crypto from 'crypto';
 // written from prose documentation summaries and got several things wrong
 // (camelCase `appId` instead of `app_id`, auth params in the query string
 // instead of the POST body, and a wrong getResult response shape) — all of
-// which surfaced as a real "app_id illegal" error in production. This
-// version was rewritten against a real, working open-source reference
-// implementation (github.com/doem97/audio_to_SRT's webapi.py) rather than
-// prose docs, which is far more trustworthy for exact field names and
-// request shape. If it's still wrong, `raw` in any xfyun-* error response
-// dumps the actual payload iFlytek sent back.
+// which surfaced as a real "app_id illegal" error in production. It was
+// then rewritten against a real, working open-source reference
+// implementation (github.com/doem97/audio_to_SRT's webapi.py), which fixed
+// that error but produced a new one ("no appId info") — most likely
+// because this file used `https://` while the reference (and, evidently,
+// the server) uses plain `http://`; a client following an https→http
+// redirect commonly drops the POST body entirely, which would silently
+// wipe every field including app_id. Matching the reference's `http://`
+// exactly removes that redirect. If it's still wrong, `raw` in any
+// xfyun-* error response dumps the actual payload iFlytek sent back.
 
-const LFASR_HOST = 'https://raasr.xfyun.cn/api';
+const LFASR_HOST = 'http://raasr.xfyun.cn/api';
 
 export type XfyunResult =
   | { transcript: string }
@@ -45,7 +49,11 @@ async function postForm(
   path: string,
   fields: Record<string, string>
 ): Promise<{ ok: number; data?: unknown; failed?: string; raw: string }> {
-  const body = new URLSearchParams(fields);
+  // Serialized to a plain string rather than passed as a URLSearchParams
+  // object — removes any ambiguity about how a given fetch/undici version
+  // encodes that type, given how much this integration has already gone
+  // wrong on encoding assumptions.
+  const body = new URLSearchParams(fields).toString();
   const res = await fetch(`${LFASR_HOST}${path}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
