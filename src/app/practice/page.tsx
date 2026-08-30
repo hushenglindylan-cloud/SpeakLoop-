@@ -5,7 +5,7 @@ import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { mockPracticeQuestions } from '@/lib/mock/data';
 import { StepIndicator } from '@/components/step-indicator';
-import { addPracticeTranscript } from '@/lib/store/interview-session';
+import { addPracticeTranscript, updatePracticeTranscriptAnswer } from '@/lib/store/interview-session';
 
 type Phase = 'intro' | 'question' | 'recording' | 'followup' | 'followup-recording' | 'finished';
 
@@ -79,7 +79,12 @@ export default function PracticePage() {
   const [phase, setPhase] = useState<Phase>('intro');
   const [currentQ, setCurrentQ] = useState(0);
   const [isRecording, setIsRecording] = useState(false);
-  const [isTranscribing, setIsTranscribing] = useState(false);
+  // Guards only the brief moment the MediaRecorder is being stopped and
+  // collected (well under a second) — not the STT call itself, which now
+  // runs in the background so it never blocks the conversation.
+  const [isStopping, setIsStopping] = useState(false);
+  // Only used once, if needed, when leaving for /final-evaluation.
+  const [isFinalizing, setIsFinalizing] = useState(false);
   const [showQuestion, setShowQuestion] = useState(false);
   const [elapsed, setElapsed] = useState(0);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -87,6 +92,10 @@ export default function PracticePage() {
   const mediaStreamRef = useRef<MediaStream | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
   const recordedMimeTypeRef = useRef<string | undefined>(undefined);
+  // Background transcription promises in flight — awaited only once, right
+  // before leaving for /final-evaluation, so every answer has real text by
+  // then (used there as evidence for the progress comparison).
+  const pendingTranscriptionsRef = useRef<Promise<void>[]>([]);
 
   const question = mockPracticeQuestions[currentQ];
 
@@ -178,25 +187,31 @@ export default function PracticePage() {
     }
   };
 
-  // Stop recording, transcribe via backend STT (silently — this text is only
-  // used later as evidence in the Final Evaluation comparison), and save.
+  // Stop recording and move on immediately — transcription happens in the
+  // background (silently — this text is only used later as evidence in the
+  // Final Evaluation comparison) so it never stalls the conversation. A
+  // placeholder is saved at the question's correct index right away;
+  // transcribeAudio patches in the real text whenever it resolves.
   const finishAnswer = useCallback(async (isFollowUp: boolean) => {
+    if (isStopping) return;
+    setIsStopping(true);
     setIsRecording(false);
     setShowQuestion(false);
-    setIsTranscribing(true);
 
     const audioBlob = await stopAndCollectAudio();
     setElapsed(0);
+    setIsStopping(false);
 
-    const transcript = await transcribeAudio(audioBlob);
-
-    addPracticeTranscript({
+    const index = addPracticeTranscript({
       question: isFollowUp ? question.aiFollowUp : question.question,
       questionType: isFollowUp ? 'followup' : 'main',
-      answer: transcript,
+      answer: '',
     });
-
-    setIsTranscribing(false);
+    pendingTranscriptionsRef.current.push(
+      transcribeAudio(audioBlob).then((transcript) => {
+        updatePracticeTranscriptAnswer(index, transcript);
+      })
+    );
 
     if (isFollowUp) {
       if (currentQ < mockPracticeQuestions.length - 1) {
@@ -216,13 +231,26 @@ export default function PracticePage() {
         startRecording();
       }, 3000);
     }
-  }, [currentQ, question, startRecording, stopAndCollectAudio]);
+  }, [currentQ, isStopping, question, startRecording, stopAndCollectAudio]);
 
   const handleFinishMainAnswer = () => finishAnswer(false);
   const handleFinishFollowUp = () => finishAnswer(true);
 
   const handleViewQuestion = () => {
     setShowQuestion(true);
+  };
+
+  // The only point in the flow where we wait on background transcription —
+  // everywhere else the conversation moves on without it. If every answer
+  // already finished transcribing by the time the student reaches this
+  // screen (the common case), this resolves instantly and nothing is felt.
+  const handleGoToFinalEvaluation = async () => {
+    if (pendingTranscriptionsRef.current.length > 0) {
+      setIsFinalizing(true);
+      await Promise.all(pendingTranscriptionsRef.current);
+      setIsFinalizing(false);
+    }
+    router.push('/final-evaluation');
   };
 
   return (
@@ -304,10 +332,11 @@ export default function PracticePage() {
               Great job applying the feedback from your first interview. Ready to see your final evaluation?
             </p>
             <button
-              onClick={() => router.push('/final-evaluation')}
-              className="rounded-xl bg-[#DA291C] px-8 py-3.5 text-base font-semibold text-white shadow-lg shadow-[#DA291C]/20 transition-all hover:bg-[#B91C1C] hover:shadow-xl"
+              onClick={handleGoToFinalEvaluation}
+              disabled={isFinalizing}
+              className="rounded-xl bg-[#DA291C] px-8 py-3.5 text-base font-semibold text-white shadow-lg shadow-[#DA291C]/20 transition-all hover:bg-[#B91C1C] hover:shadow-xl disabled:opacity-60 disabled:cursor-not-allowed"
             >
-              View Final Evaluation →
+              {isFinalizing ? 'Finalizing...' : 'View Final Evaluation →'}
             </button>
           </div>
         )}
@@ -324,10 +353,7 @@ export default function PracticePage() {
                     <span className="text-sm text-slate-500">Recording in progress...</span>
                   </>
                 )}
-                {isTranscribing && (
-                  <span className="text-sm text-slate-500">Transcribing your answer...</span>
-                )}
-                {!isRecording && !isTranscribing && (phase === 'question' || phase === 'followup') && (
+                {!isRecording && (phase === 'question' || phase === 'followup') && (
                   <span className="text-sm text-slate-400">Examiner is speaking...</span>
                 )}
               </div>
@@ -380,23 +406,10 @@ export default function PracticePage() {
                 </div>
               )}
 
-              {/* Transcribing Overlay */}
-              {isTranscribing && (
-                <div className="absolute inset-0 bg-black/50 flex items-center justify-center">
-                  <div className="text-center">
-                    <div className="flex items-center justify-center gap-1.5 mb-4">
-                      <span className="w-2.5 h-2.5 bg-white rounded-full animate-bounce [animation-delay:-0.3s]"></span>
-                      <span className="w-2.5 h-2.5 bg-white rounded-full animate-bounce [animation-delay:-0.15s]"></span>
-                      <span className="w-2.5 h-2.5 bg-white rounded-full animate-bounce"></span>
-                    </div>
-                    <p className="text-white text-lg font-medium">Transcribing your answer...</p>
-                  </div>
-                </div>
-              )}
             </div>
 
             {/* Focus hint + question text toggle — scrollable area, not the sticky bar */}
-            {(phase === 'recording' || phase === 'followup-recording') && !isTranscribing && (
+            {(phase === 'recording' || phase === 'followup-recording') && (
               <div className="mt-4 space-y-4">
                 {phase === 'recording' && (
                   <div className="rounded-xl border border-amber-100 bg-amber-50/50 p-3">
@@ -458,10 +471,10 @@ export default function PracticePage() {
           <div className="max-w-4xl mx-auto px-6 py-4" style={{ paddingBottom: 'calc(1rem + env(safe-area-inset-bottom))' }}>
             <button
               onClick={phase === 'recording' ? handleFinishMainAnswer : handleFinishFollowUp}
-              disabled={isTranscribing}
+              disabled={isStopping}
               className="w-full py-3.5 bg-slate-800 text-white rounded-xl font-medium hover:bg-slate-700 transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
             >
-              {isTranscribing ? 'Transcribing...' : 'Finish Answer'}
+              Finish Answer
             </button>
           </div>
         </div>

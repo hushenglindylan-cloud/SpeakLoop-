@@ -4,7 +4,7 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { StepIndicator } from '@/components/step-indicator';
-import { addTranscript } from '@/lib/store/interview-session';
+import { addTranscript, updateTranscriptAnswer } from '@/lib/store/interview-session';
 
 const mockQuestions = [
   {
@@ -104,7 +104,13 @@ export default function InterviewPage() {
   const [phase, setPhase] = useState<Phase>('examiner-intro');
   const [currentQ, setCurrentQ] = useState(0);
   const [isRecording, setIsRecording] = useState(false);
-  const [isTranscribing, setIsTranscribing] = useState(false);
+  // Guards only the brief moment the MediaRecorder is being stopped and
+  // collected (well under a second) — not the STT call itself, which now
+  // runs in the background so it never blocks the conversation.
+  const [isStopping, setIsStopping] = useState(false);
+  // Only used once, if needed, when leaving for /evaluation — see
+  // handleGoToEvaluation.
+  const [isFinalizing, setIsFinalizing] = useState(false);
   const [showQuestion, setShowQuestion] = useState(false);
   const [elapsed, setElapsed] = useState(0);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -112,6 +118,9 @@ export default function InterviewPage() {
   const mediaStreamRef = useRef<MediaStream | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
   const recordedMimeTypeRef = useRef<string | undefined>(undefined);
+  // Background transcription promises in flight — awaited only once, right
+  // before leaving for /evaluation, so every answer has real text by then.
+  const pendingTranscriptionsRef = useRef<Promise<void>[]>([]);
 
   // Timer for recording
   useEffect(() => {
@@ -208,26 +217,31 @@ export default function InterviewPage() {
     });
   }, [startRecording]);
 
-  // Stop recording, transcribe via backend STT, and save to global state.
-  // Always saves an entry (even a placeholder) so a question can never be
-  // silently dropped from the session.
+  // Stop recording and move on immediately — transcription happens in the
+  // background so it never stalls the conversation. A placeholder is saved
+  // at the question's correct index right away; transcribeAudio patches in
+  // the real text (or an error placeholder) whenever it resolves, however
+  // long that takes and regardless of what order answers finish in.
   const stopRecordingAndSave = useCallback(async (isFollowUp: boolean) => {
+    if (isStopping) return;
+    setIsStopping(true);
     setIsRecording(false);
     setShowQuestion(false);
-    setIsTranscribing(true);
 
     const audioBlob = await stopAndCollectAudio();
     setElapsed(0);
+    setIsStopping(false);
 
-    const transcript = await transcribeAudio(audioBlob);
-
-    addTranscript({
+    const index = addTranscript({
       question: isFollowUp ? mockQuestions[currentQ].followUp : mockQuestions[currentQ].question,
       questionType: isFollowUp ? 'followup' : 'main',
-      answer: transcript,
+      answer: '',
     });
-
-    setIsTranscribing(false);
+    pendingTranscriptionsRef.current.push(
+      transcribeAudio(audioBlob).then((transcript) => {
+        updateTranscriptAnswer(index, transcript);
+      })
+    );
 
     // Move to next phase
     if (isFollowUp) {
@@ -244,7 +258,7 @@ export default function InterviewPage() {
         playFollowUpAndRecord();
       }, 300);
     }
-  }, [currentQ, playQuestionAndRecord, playFollowUpAndRecord, stopAndCollectAudio]);
+  }, [currentQ, isStopping, playQuestionAndRecord, playFollowUpAndRecord, stopAndCollectAudio]);
 
   const handleStartQuestion = () => {
     playQuestionAndRecord();
@@ -262,7 +276,16 @@ export default function InterviewPage() {
     setShowQuestion(true);
   };
 
-  const handleGoToEvaluation = () => {
+  // The only point in the flow where we wait on background transcription —
+  // everywhere else the conversation moves on without it. If every answer
+  // already finished transcribing by the time the student reaches this
+  // screen (the common case), this resolves instantly and nothing is felt.
+  const handleGoToEvaluation = async () => {
+    if (pendingTranscriptionsRef.current.length > 0) {
+      setIsFinalizing(true);
+      await Promise.all(pendingTranscriptionsRef.current);
+      setIsFinalizing(false);
+    }
     router.push('/evaluation');
   };
 
@@ -288,10 +311,7 @@ export default function InterviewPage() {
                 <span className="text-sm text-slate-500">Recording in progress...</span>
               </>
             )}
-            {isTranscribing && (
-              <span className="text-sm text-slate-500">Transcribing your answer...</span>
-            )}
-            {!isRecording && !isTranscribing && phase !== 'finished' && phase !== 'examiner-intro' && (
+            {!isRecording && phase !== 'finished' && phase !== 'examiner-intro' && (
               <span className="text-sm text-slate-400">Waiting...</span>
             )}
           </div>
@@ -339,20 +359,6 @@ export default function InterviewPage() {
             </div>
           )}
 
-          {/* Transcribing Overlay */}
-          {isTranscribing && (
-            <div className="absolute inset-0 bg-black/50 flex items-center justify-center">
-              <div className="text-center">
-                <div className="flex items-center justify-center gap-1.5 mb-4">
-                  <span className="w-2.5 h-2.5 bg-white rounded-full animate-bounce [animation-delay:-0.3s]"></span>
-                  <span className="w-2.5 h-2.5 bg-white rounded-full animate-bounce [animation-delay:-0.15s]"></span>
-                  <span className="w-2.5 h-2.5 bg-white rounded-full animate-bounce"></span>
-                </div>
-                <p className="text-white text-lg font-medium">Transcribing your answer...</p>
-              </div>
-            </div>
-          )}
-
           {/* Finished Overlay */}
           {phase === 'finished' && (
             <div className="absolute inset-0 bg-black/60 flex items-center justify-center">
@@ -370,7 +376,7 @@ export default function InterviewPage() {
         </div>
 
         {/* Question text toggle — lives in the scrollable area, not the sticky bar */}
-        {(phase === 'recording' || phase === 'followup-recording') && !isTranscribing && (
+        {(phase === 'recording' || phase === 'followup-recording') && (
           <div className="mt-4">
             {!showQuestion ? (
               <div className="bg-slate-50 rounded-xl p-4 text-center">
@@ -431,19 +437,20 @@ export default function InterviewPage() {
           {(phase === 'recording' || phase === 'followup-recording') && (
             <button
               onClick={phase === 'recording' ? handleFinishMainAnswer : handleFinishFollowUp}
-              disabled={isTranscribing}
+              disabled={isStopping}
               className="w-full py-3.5 bg-slate-800 text-white rounded-xl font-medium hover:bg-slate-700 transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
             >
-              {isTranscribing ? 'Transcribing...' : 'Finish Answer'}
+              Finish Answer
             </button>
           )}
 
           {phase === 'finished' && (
             <button
               onClick={handleGoToEvaluation}
-              className="w-full py-3.5 bg-[#DA291C] text-white rounded-xl font-medium hover:bg-[#B91C1C] transition-colors"
+              disabled={isFinalizing}
+              className="w-full py-3.5 bg-[#DA291C] text-white rounded-xl font-medium hover:bg-[#B91C1C] transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
             >
-              View My Evaluation
+              {isFinalizing ? 'Finalizing...' : 'View My Evaluation'}
             </button>
           )}
         </div>

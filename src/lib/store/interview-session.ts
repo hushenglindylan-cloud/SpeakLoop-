@@ -63,16 +63,39 @@ export function getSession(): InterviewSession | null {
   return session;
 }
 
-export function addTranscript(entry: TranscriptEntry) {
+// Returns the index the entry was stored at, so a caller that doesn't have
+// the transcript text yet (STT still running in the background) can reserve
+// its place in question order now and patch in the real answer later via
+// updateTranscriptAnswer — without that, a background transcription that
+// resolves out of order could land against the wrong question.
+export function addTranscript(entry: TranscriptEntry): number {
   if (session) {
-    session.transcripts.push(entry);
+    const index = session.transcripts.push(entry) - 1;
+    saveSession(session);
+    return index;
+  }
+  return -1;
+}
+
+export function updateTranscriptAnswer(index: number, answer: string) {
+  if (session && session.transcripts[index]) {
+    session.transcripts[index].answer = answer;
     saveSession(session);
   }
 }
 
-export function addPracticeTranscript(entry: TranscriptEntry) {
+export function addPracticeTranscript(entry: TranscriptEntry): number {
   if (session) {
-    session.practiceTranscripts.push(entry);
+    const index = session.practiceTranscripts.push(entry) - 1;
+    saveSession(session);
+    return index;
+  }
+  return -1;
+}
+
+export function updatePracticeTranscriptAnswer(index: number, answer: string) {
+  if (session && session.practiceTranscripts[index]) {
+    session.practiceTranscripts[index].answer = answer;
     saveSession(session);
   }
 }
