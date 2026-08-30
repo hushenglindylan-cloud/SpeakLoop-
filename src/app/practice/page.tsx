@@ -28,8 +28,10 @@ function pickSupportedMimeType(): string | undefined {
 }
 
 // Map a MediaRecorder mimeType to a sensible filename + extension so the
-// backend (and OpenAI's Whisper API, which infers format from the filename)
-// receives a file that actually matches how it was encoded.
+// backend receives a file whose name reflects how it was originally
+// encoded. Kept as a debugging aid — the uploaded bytes are converted to
+// raw PCM before sending, so the transcription service no longer infers
+// anything from this name.
 function filenameForMimeType(mimeType: string | undefined): string {
   if (!mimeType) return 'recording.webm';
   if (mimeType.includes('mp4')) return 'recording.mp4';
@@ -46,7 +48,7 @@ function filenameForMimeType(mimeType: string | undefined): string {
 async function transcribeAudio(blob: Blob | null): Promise<string> {
   if (!blob || blob.size === 0) {
     // The MediaRecorder produced zero bytes — this never reaches /api/stt at
-    // all, so it's unrelated to whether GROQ_API_KEY/OPENAI_API_KEY is set.
+    // all, so it's unrelated to whether the iFlytek credentials are set.
     // Tagged distinctly from the backend's own "couldn't detect voice"
     // responses so the two failure points aren't confused while debugging.
     console.error('STT skipped: recorded blob is empty (client-side capture produced 0 bytes)');
