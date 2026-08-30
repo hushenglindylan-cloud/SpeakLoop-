@@ -1,5 +1,16 @@
 import { NextRequest, NextResponse } from 'next/server';
 
+// Lets the deployed environment be checked from a browser/curl without
+// exposing the key values themselves — mainly to confirm whether an env var
+// change (e.g. adding GROQ_API_KEY on the hosting platform) actually took
+// effect after a redeploy, which otherwise requires reading server logs.
+export async function GET() {
+  return NextResponse.json({
+    groqConfigured: Boolean(process.env.GROQ_API_KEY),
+    openaiConfigured: Boolean(process.env.OPENAI_API_KEY),
+  });
+}
+
 export async function POST(request: NextRequest) {
   try {
     const formData = await request.formData();
@@ -12,10 +23,17 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Check if audio is empty or too small (less than 1KB = likely no voice)
+    // Check if audio is empty or too small (less than 1KB = likely no voice).
+    // Tagged with `stage: 'local-size-check'` so this is distinguishable from
+    // a provider-side "empty transcript" response further down — this one
+    // never even reaches Groq/OpenAI, so a configured API key is irrelevant here.
     if (audioBlob.size < 1024) {
       return NextResponse.json(
-        { error: 'We couldn\'t detect your voice. Please try again.' },
+        {
+          error: 'We couldn\'t detect your voice. Please try again.',
+          stage: 'local-size-check',
+          audioBytes: audioBlob.size,
+        },
         { status: 422 }
       );
     }
@@ -78,7 +96,12 @@ export async function POST(request: NextRequest) {
       }
       console.error(`STT provider error (${groqKey ? 'Groq' : 'OpenAI'}, status ${response.status}):`, error);
       return NextResponse.json(
-        { error: `We couldn't process your answer (${groqKey ? 'Groq' : 'OpenAI'} ${response.status}). Please try again.` },
+        {
+          error: `We couldn't process your answer (${groqKey ? 'Groq' : 'OpenAI'} ${response.status}). Please try again.`,
+          stage: 'provider-error',
+          provider: groqKey ? 'groq' : 'openai',
+          providerStatus: response.status,
+        },
         { status: 500 }
       );
     }
@@ -86,8 +109,15 @@ export async function POST(request: NextRequest) {
     const data = await response.json();
 
     if (!data.text || data.text.trim().length === 0) {
+      // The provider was actually reached and responded 200 OK, it just
+      // heard nothing — different from `local-size-check` above, which never
+      // got this far.
       return NextResponse.json(
-        { error: 'We couldn\'t detect your voice. Please try again.' },
+        {
+          error: 'We couldn\'t detect your voice. Please try again.',
+          stage: 'provider-empty-transcript',
+          provider: groqKey ? 'groq' : 'openai',
+        },
         { status: 422 }
       );
     }

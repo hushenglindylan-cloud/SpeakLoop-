@@ -44,7 +44,12 @@ function filenameForMimeType(mimeType: string | undefined): string {
 // comparison — it is not shown during the practice session itself.
 async function transcribeAudio(blob: Blob | null): Promise<string> {
   if (!blob || blob.size === 0) {
-    return '[No speech detected]';
+    // The MediaRecorder produced zero bytes — this never reaches /api/stt at
+    // all, so it's unrelated to whether GROQ_API_KEY/OPENAI_API_KEY is set.
+    // Tagged distinctly from the backend's own "couldn't detect voice"
+    // responses so the two failure points aren't confused while debugging.
+    console.error('STT skipped: recorded blob is empty (client-side capture produced 0 bytes)');
+    return '[No speech detected (client-empty-blob)]';
   }
   try {
     const formData = new FormData();
@@ -58,7 +63,8 @@ async function transcribeAudio(blob: Blob | null): Promise<string> {
 
     if (!res.ok) {
       console.error('STT request failed:', res.status, data);
-      return `[Transcription error: ${data?.error || `HTTP ${res.status}`}]`;
+      const stageSuffix = data?.stage ? ` (${data.stage})` : '';
+      return `[Transcription error: ${data?.error || `HTTP ${res.status}`}${stageSuffix}]`;
     }
 
     return '[No speech detected]';
