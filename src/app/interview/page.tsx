@@ -79,20 +79,19 @@ async function transcribeAudio(blob: Blob | null): Promise<string> {
     const res = await fetch('/api/stt', { method: 'POST', body: formData });
     const data = await res.json();
 
-    if (res.ok && typeof data.transcript === 'string' && data.transcript.trim().length > 0) {
+    if (typeof data.transcript === 'string' && data.transcript.trim().length > 0) {
       return data.transcript.trim();
     }
 
-    if (!res.ok) {
-      // Surface the real backend error instead of masking every failure as
-      // "no speech detected" — check the browser console / Network tab for
-      // the full response body from /api/stt if you see this.
-      console.error('STT request failed:', res.status, data);
-      const stageSuffix = data?.stage ? ` (${data.stage})` : '';
-      return `[Transcription error: ${data?.error || `HTTP ${res.status}`}${stageSuffix}]`;
-    }
-
-    return '[No speech detected]';
+    // /api/stt always answers 200 with either a transcript or an `error`
+    // field (see route.ts) — specifically so a hosting platform's gateway
+    // can't quietly replace a non-2xx response body before it reaches us.
+    // So `data.error` is the real signal here, not res.status; a non-OK or
+    // genuinely empty response means something outside our own code
+    // intervened (check the browser Network tab for the raw response).
+    console.error('STT request failed:', res.status, data);
+    const stageSuffix = data?.stage ? ` (${data.stage})` : '';
+    return `[Transcription error: ${data?.error || (res.ok ? 'empty response from server' : `HTTP ${res.status}`)}${stageSuffix}]`;
   } catch (err) {
     console.error('STT request failed:', err);
     return '[Transcription failed — please check your connection]';

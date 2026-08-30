@@ -11,16 +11,20 @@ export async function GET() {
   });
 }
 
+// Hosting platforms commonly put a reverse proxy/gateway in front of the app
+// that sanitizes any 5xx response — replacing the body (observed in practice
+// as an empty `{}`) before it reaches the browser, to avoid leaking upstream
+// error details. That silently destroyed every diagnostic this route adds.
+// A 2xx body is essentially never rewritten this way, so every response
+// here — success or failure — uses status 200 and signals failure with an
+// `error` field in the JSON body instead of the HTTP status code.
 export async function POST(request: NextRequest) {
   try {
     const formData = await request.formData();
     const audioBlob = formData.get('audio') as Blob;
 
     if (!audioBlob) {
-      return NextResponse.json(
-        { error: 'No audio provided' },
-        { status: 400 }
-      );
+      return NextResponse.json({ error: 'No audio provided', stage: 'no-audio' });
     }
 
     // Check if audio is empty or too small (less than 1KB = likely no voice).
@@ -28,14 +32,11 @@ export async function POST(request: NextRequest) {
     // a provider-side "empty transcript" response further down — this one
     // never even reaches Groq/OpenAI, so a configured API key is irrelevant here.
     if (audioBlob.size < 1024) {
-      return NextResponse.json(
-        {
-          error: 'We couldn\'t detect your voice. Please try again.',
-          stage: 'local-size-check',
-          audioBytes: audioBlob.size,
-        },
-        { status: 422 }
-      );
+      return NextResponse.json({
+        error: 'We couldn\'t detect your voice. Please try again.',
+        stage: 'local-size-check',
+        audioBytes: audioBlob.size,
+      });
     }
 
     const groqKey = process.env.GROQ_API_KEY;
@@ -105,16 +106,13 @@ export async function POST(request: NextRequest) {
         `STT ${isTimeout ? 'timed out calling' : 'network error calling'} ${groqKey ? 'Groq' : 'OpenAI'}:`,
         fetchError
       );
-      return NextResponse.json(
-        {
-          error: isTimeout
-            ? `The transcription service took too long to respond (>${providerTimeoutMs / 1000}s). Please try again.`
-            : `We couldn't reach the transcription service (${groqKey ? 'Groq' : 'OpenAI'}). Please try again.`,
-          stage: isTimeout ? 'provider-timeout' : 'provider-network-error',
-          provider: groqKey ? 'groq' : 'openai',
-        },
-        { status: 500 }
-      );
+      return NextResponse.json({
+        error: isTimeout
+          ? `The transcription service took too long to respond (>${providerTimeoutMs / 1000}s). Please try again.`
+          : `We couldn't reach the transcription service (${groqKey ? 'Groq' : 'OpenAI'}). Please try again.`,
+        stage: isTimeout ? 'provider-timeout' : 'provider-network-error',
+        provider: groqKey ? 'groq' : 'openai',
+      });
     } finally {
       clearTimeout(timeoutId);
     }
@@ -128,15 +126,12 @@ export async function POST(request: NextRequest) {
         // not JSON — keep the raw text
       }
       console.error(`STT provider error (${groqKey ? 'Groq' : 'OpenAI'}, status ${response.status}):`, error);
-      return NextResponse.json(
-        {
-          error: `We couldn't process your answer (${groqKey ? 'Groq' : 'OpenAI'} ${response.status}). Please try again.`,
-          stage: 'provider-error',
-          provider: groqKey ? 'groq' : 'openai',
-          providerStatus: response.status,
-        },
-        { status: 500 }
-      );
+      return NextResponse.json({
+        error: `We couldn't process your answer (${groqKey ? 'Groq' : 'OpenAI'} ${response.status}). Please try again.`,
+        stage: 'provider-error',
+        provider: groqKey ? 'groq' : 'openai',
+        providerStatus: response.status,
+      });
     }
 
     const data = await response.json();
@@ -145,14 +140,11 @@ export async function POST(request: NextRequest) {
       // The provider was actually reached and responded 200 OK, it just
       // heard nothing — different from `local-size-check` above, which never
       // got this far.
-      return NextResponse.json(
-        {
-          error: 'We couldn\'t detect your voice. Please try again.',
-          stage: 'provider-empty-transcript',
-          provider: groqKey ? 'groq' : 'openai',
-        },
-        { status: 422 }
-      );
+      return NextResponse.json({
+        error: 'We couldn\'t detect your voice. Please try again.',
+        stage: 'provider-empty-transcript',
+        provider: groqKey ? 'groq' : 'openai',
+      });
     }
 
     return NextResponse.json({
@@ -160,13 +152,10 @@ export async function POST(request: NextRequest) {
     });
   } catch (error) {
     console.error('STT error:', error);
-    return NextResponse.json(
-      {
-        error: 'We couldn\'t process your answer. Please try again.',
-        stage: 'unhandled-exception',
-        detail: error instanceof Error ? error.message : String(error),
-      },
-      { status: 500 }
-    );
+    return NextResponse.json({
+      error: 'We couldn\'t process your answer. Please try again.',
+      stage: 'unhandled-exception',
+      detail: error instanceof Error ? error.message : String(error),
+    });
   }
 }
