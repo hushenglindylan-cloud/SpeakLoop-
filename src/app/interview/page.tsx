@@ -91,7 +91,8 @@ async function transcribeAudio(blob: Blob | null): Promise<string> {
     // intervened (check the browser Network tab for the raw response).
     console.error('STT request failed:', res.status, data);
     const stageSuffix = data?.stage ? ` (${data.stage})` : '';
-    return `[Transcription error: ${data?.error || (res.ok ? 'empty response from server' : `HTTP ${res.status}`)}${stageSuffix}]`;
+    const detailSuffix = data?.providerDetail ? ` — ${data.providerDetail}` : '';
+    return `[Transcription error: ${data?.error || (res.ok ? 'empty response from server' : `HTTP ${res.status}`)}${stageSuffix}${detailSuffix}]`;
   } catch (err) {
     console.error('STT request failed:', err);
     return '[Transcription failed — please check your connection]';

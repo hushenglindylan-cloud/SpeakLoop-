@@ -126,11 +126,18 @@ export async function POST(request: NextRequest) {
         // not JSON — keep the raw text
       }
       console.error(`STT provider error (${groqKey ? 'Groq' : 'OpenAI'}, status ${response.status}):`, error);
+      // Surface the provider's own error body (e.g. Groq's message explaining
+      // *why* it returned 403 — invalid key vs. region-blocked vs. something
+      // else) instead of just the status code, since that detail previously
+      // only reached the server logs, which have been hard to get to.
+      const providerErrorText =
+        typeof error === 'string' ? error : JSON.stringify(error);
       return NextResponse.json({
         error: `We couldn't process your answer (${groqKey ? 'Groq' : 'OpenAI'} ${response.status}). Please try again.`,
         stage: 'provider-error',
         provider: groqKey ? 'groq' : 'openai',
         providerStatus: response.status,
+        providerDetail: providerErrorText.slice(0, 500),
       });
     }
 
