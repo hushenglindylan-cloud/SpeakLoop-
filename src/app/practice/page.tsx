@@ -6,6 +6,7 @@ import { useRouter } from 'next/navigation';
 import { mockPracticeQuestions } from '@/lib/mock/data';
 import { StepIndicator } from '@/components/step-indicator';
 import { addPracticeTranscript, updatePracticeTranscriptAnswer } from '@/lib/store/interview-session';
+import { blobToPcm16kMono } from '@/lib/audio/pcm';
 
 type Phase = 'intro' | 'question' | 'recording' | 'followup' | 'followup-recording' | 'finished';
 
@@ -52,8 +53,20 @@ async function transcribeAudio(blob: Blob | null): Promise<string> {
     return '[No speech detected (client-empty-blob)]';
   }
   try {
+    // iFlytek's real-time transcription needs raw 16 kHz mono PCM, and the
+    // server has no ffmpeg — so the conversion happens here, where the same
+    // browser that recorded the audio can decode it. A failure here is
+    // reported distinctly rather than being mistaken for a backend problem.
+    let uploadBlob: Blob;
+    try {
+      uploadBlob = await blobToPcm16kMono(blob);
+    } catch (conversionError) {
+      console.error('Audio conversion to PCM failed:', conversionError);
+      return '[Transcription error: could not convert the recording for upload (client-audio-conversion)]';
+    }
+
     const formData = new FormData();
-    formData.append('audio', blob, filenameForMimeType(blob.type));
+    formData.append('audio', uploadBlob, filenameForMimeType(blob.type));
     const res = await fetch('/api/stt', { method: 'POST', body: formData });
     const data = await res.json();
 

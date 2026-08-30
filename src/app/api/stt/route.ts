@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { transcribeWithXfyun } from '@/lib/stt/xfyun';
+import { transcribeWithXfyunRtasr } from '@/lib/stt/xfyun-rtasr';
+
+const xfyunKey = () => process.env.XFYUN_API_KEY || process.env.XFYUN_API_SECRET;
 
 // Lets the deployed environment be checked from a browser/curl without
 // exposing the key values themselves — mainly to confirm whether an env var
@@ -7,7 +9,8 @@ import { transcribeWithXfyun } from '@/lib/stt/xfyun';
 // effect after a redeploy, which otherwise requires reading server logs.
 export async function GET() {
   return NextResponse.json({
-    xfyunConfigured: Boolean(process.env.XFYUN_APP_ID && process.env.XFYUN_API_SECRET),
+    xfyunConfigured: Boolean(process.env.XFYUN_APP_ID && xfyunKey()),
+    xfyunKeyVar: process.env.XFYUN_API_KEY ? 'XFYUN_API_KEY' : process.env.XFYUN_API_SECRET ? 'XFYUN_API_SECRET' : null,
     groqConfigured: Boolean(process.env.GROQ_API_KEY),
     openaiConfigured: Boolean(process.env.OPENAI_API_KEY),
   });
@@ -43,19 +46,21 @@ export async function POST(request: NextRequest) {
 
     // Prefer iFlytek (讯飞) — reachable from mainland-China-hosted servers,
     // unlike Groq/OpenAI which returned a bare 403 from this app's actual
-    // hosting environment (see src/lib/stt/xfyun.ts for the full story).
-    if (process.env.XFYUN_APP_ID && process.env.XFYUN_API_SECRET) {
-      const uploadedName = audioBlob instanceof File ? audioBlob.name : 'recording.webm';
-      const xfyunResult = await transcribeWithXfyun(audioBlob, uploadedName);
-      if ('transcript' in xfyunResult) {
-        return NextResponse.json({ transcript: xfyunResult.transcript });
+    // hosting environment (see src/lib/stt/xfyun-rtasr.ts for the full story).
+    // RTASR needs raw 16 kHz mono PCM, which the client converts to before
+    // uploading (src/lib/audio/pcm.ts) since the server has no ffmpeg.
+    if (process.env.XFYUN_APP_ID && xfyunKey()) {
+      const pcm = Buffer.from(await audioBlob.arrayBuffer());
+      const rtasrResult = await transcribeWithXfyunRtasr(pcm);
+      if ('transcript' in rtasrResult) {
+        return NextResponse.json({ transcript: rtasrResult.transcript });
       }
       return NextResponse.json({
-        error: xfyunResult.error,
-        stage: xfyunResult.stage,
-        provider: 'xfyun',
-        providerDetail: xfyunResult.detail,
-        raw: xfyunResult.raw,
+        error: rtasrResult.error,
+        stage: rtasrResult.stage,
+        provider: 'xfyun-rtasr',
+        providerDetail: rtasrResult.detail,
+        raw: rtasrResult.raw,
       });
     }
 
