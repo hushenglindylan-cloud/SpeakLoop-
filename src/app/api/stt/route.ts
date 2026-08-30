@@ -1,19 +1,21 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { transcribeWithXfyunRtasr } from '@/lib/stt/xfyun-rtasr';
+import { transcribeWithXfyunAst } from '@/lib/stt/xfyun-ast';
 
-const xfyunKey = () => process.env.XFYUN_API_KEY || process.env.XFYUN_API_SECRET;
+const xfyunConfigured = () =>
+  Boolean(process.env.XFYUN_APP_ID && process.env.XFYUN_API_KEY && process.env.XFYUN_API_SECRET);
 
 // Lets the deployed environment be checked from a browser/curl without
 // exposing the key values themselves — mainly to confirm whether an env var
 // change on the hosting platform actually took effect after a redeploy,
-// which otherwise requires reading server logs. `xfyunKeyVar` reports which
-// variable name the key was actually found under, since RTASR wants the
-// account's APIKey and an earlier iteration of this integration asked for
-// APISecret instead.
+// which otherwise requires reading server logs.
 export async function GET() {
   return NextResponse.json({
-    xfyunConfigured: Boolean(process.env.XFYUN_APP_ID && xfyunKey()),
-    xfyunKeyVar: process.env.XFYUN_API_KEY ? 'XFYUN_API_KEY' : process.env.XFYUN_API_SECRET ? 'XFYUN_API_SECRET' : null,
+    xfyunConfigured: xfyunConfigured(),
+    // Named individually so a partially-configured deployment shows exactly
+    // which of the three values is missing, without exposing any of them.
+    xfyunAppId: Boolean(process.env.XFYUN_APP_ID),
+    xfyunApiKey: Boolean(process.env.XFYUN_API_KEY),
+    xfyunApiSecret: Boolean(process.env.XFYUN_API_SECRET),
   });
 }
 
@@ -45,7 +47,7 @@ export async function POST(request: NextRequest) {
       });
     }
 
-    // iFlytek (讯飞) RTASR is the only real provider here. Groq and OpenAI
+    // iFlytek (讯飞) is the only real provider here. Groq and OpenAI
     // Whisper were tried first but are unreachable from this app's hosting
     // network — Groq returned a bare 403 "Forbidden" with no detail, which
     // is what an IP/region-level block looks like, and it reproduced with a
@@ -53,20 +55,20 @@ export async function POST(request: NextRequest) {
     // is gone rather than left as dead weight; git history has it if a
     // future deployment lives somewhere those services are reachable.
     //
-    // RTASR needs raw 16 kHz mono PCM, which the client converts to before
+    // It needs raw 16 kHz mono PCM, which the client converts to before
     // uploading (src/lib/audio/pcm.ts) since the server has no ffmpeg.
-    if (process.env.XFYUN_APP_ID && xfyunKey()) {
+    if (xfyunConfigured()) {
       const pcm = Buffer.from(await audioBlob.arrayBuffer());
-      const rtasrResult = await transcribeWithXfyunRtasr(pcm);
-      if ('transcript' in rtasrResult) {
-        return NextResponse.json({ transcript: rtasrResult.transcript });
+      const astResult = await transcribeWithXfyunAst(pcm);
+      if ('transcript' in astResult) {
+        return NextResponse.json({ transcript: astResult.transcript });
       }
       return NextResponse.json({
-        error: rtasrResult.error,
-        stage: rtasrResult.stage,
-        provider: 'xfyun-rtasr',
-        providerDetail: rtasrResult.detail,
-        raw: rtasrResult.raw,
+        error: astResult.error,
+        stage: astResult.stage,
+        provider: 'xfyun-ast',
+        providerDetail: astResult.detail,
+        raw: astResult.raw,
       });
     }
 
