@@ -78,13 +78,46 @@ export async function POST(request: NextRequest) {
     openaiFormData.append('model', transcriptionModel);
     openaiFormData.append('language', 'en');
 
-    const response = await fetch(transcriptionUrl, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${apiKey}`,
-      },
-      body: openaiFormData,
-    });
+    // Groq/OpenAI transcription is normally done in a few seconds, but this
+    // fetch previously had no timeout at all. If the network path to the
+    // provider stalls (a real risk on hosting platforms that proxy/restrict
+    // outbound traffic), the request would hang until the hosting platform's
+    // own gateway timeout killed it — which replaces our response with its
+    // own generic error (often an empty body), hiding what actually failed.
+    // Racing our own timeout means we always control what the client sees.
+    const providerTimeoutMs = 20_000;
+    const timeoutController = new AbortController();
+    const timeoutId = setTimeout(() => timeoutController.abort(), providerTimeoutMs);
+
+    let response: Response;
+    try {
+      response = await fetch(transcriptionUrl, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${apiKey}`,
+        },
+        body: openaiFormData,
+        signal: timeoutController.signal,
+      });
+    } catch (fetchError) {
+      const isTimeout = fetchError instanceof Error && fetchError.name === 'AbortError';
+      console.error(
+        `STT ${isTimeout ? 'timed out calling' : 'network error calling'} ${groqKey ? 'Groq' : 'OpenAI'}:`,
+        fetchError
+      );
+      return NextResponse.json(
+        {
+          error: isTimeout
+            ? `The transcription service took too long to respond (>${providerTimeoutMs / 1000}s). Please try again.`
+            : `We couldn't reach the transcription service (${groqKey ? 'Groq' : 'OpenAI'}). Please try again.`,
+          stage: isTimeout ? 'provider-timeout' : 'provider-network-error',
+          provider: groqKey ? 'groq' : 'openai',
+        },
+        { status: 500 }
+      );
+    } finally {
+      clearTimeout(timeoutId);
+    }
 
     if (!response.ok) {
       const rawText = await response.text().catch(() => '');
@@ -128,7 +161,11 @@ export async function POST(request: NextRequest) {
   } catch (error) {
     console.error('STT error:', error);
     return NextResponse.json(
-      { error: 'We couldn\'t process your answer. Please try again.' },
+      {
+        error: 'We couldn\'t process your answer. Please try again.',
+        stage: 'unhandled-exception',
+        detail: error instanceof Error ? error.message : String(error),
+      },
       { status: 500 }
     );
   }
