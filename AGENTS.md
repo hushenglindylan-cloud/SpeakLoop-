@@ -79,6 +79,27 @@
 
 ### 关键文件
 
-- `src/lib/mock/data.ts` — 所有 Mock 数据（考官、评分、练习题）
+- `PRD.md` — 产品需求文档 v3（架构、模型选型、用户流程、Evaluation 设计）
+- `DEV_PLAN.md` — 开发完成计划 v3（10 步执行路径、里程碑 M1-M9）
+- `AI_ENGINEERING.md` — AI 工程层文档（RAG 契约、Prompt 设计、评估流水线）
+- `src/lib/ai/provider.ts` — 统一 AI Provider（DashScope: Qwen3-ASR-Flash + qwen3.5-flash）
+- `src/lib/rag/retrieval.ts` — RAG 检索服务（metadata 过滤）
+- `src/data/questions.json` — 雅思题库（1014 道 Part 3 题目）
+- `src/data/rubric.ts` — 官方 IELTS Speaking Band Descriptors
+- `src/lib/mock/data.ts` — Mock 数据（考官人设、fallback 数据）
 - `src/components/step-indicator.tsx` — 步骤导航指示器
 - `DESIGN.md` — 设计规范（配色、字体、动效）
+- `HANDOFF.md` — 项目交接文档（背景、已完成事项、技术债）
+
+### API 路由
+
+| 路由 | 方法 | 功能 |
+|------|------|------|
+| `/api/stt` | POST | 语音转文字（Qwen3-ASR-Flash） |
+| `/api/interview-questions` | POST | RAG + LLM 生成面试问题 |
+| `/api/follow-up` | POST | 根据回答生成追问 |
+| `/api/evaluate-interview` | POST | IELTS 结构化评分 |
+| `/api/practice-questions` | POST | 基于弱项生成练习题 |
+| `/api/final-evaluation` | POST | 前后对比评估 |
+| `/api/analyze-progress` | POST | 进步分析 |
+| `/api/questions` | GET | 题库查询（统计/话题/检索） |

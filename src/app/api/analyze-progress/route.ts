@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { llmChat } from '@/lib/ai/provider';
 
 interface TranscriptEntry {
   question: string;
@@ -73,7 +74,7 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ improvements: [] });
     }
 
-    const apiKey = process.env.ZHIPU_API_KEY;
+    const apiKey = process.env.DASHSCOPE_API_KEY;
 
     if (!apiKey) {
       // Rule-based fallback for development without an API key configured
@@ -102,117 +103,71 @@ Rules:
 
     const userPrompt = `FIRST INTERVIEW ANSWERS:\n${formatTranscripts(interviewTranscripts)}\n\nPRACTICE SESSION ANSWERS:\n${formatTranscripts(practiceTranscripts)}`;
 
-    // Zhipu AI (智谱) — chosen because it's reachable from this app's
-    // mainland-China hosting network, unlike Groq/OpenAI which return a bare
-    // 403 from there (see src/app/api/stt/route.ts for that story). Its API
-    // is OpenAI-compatible, so only the base URL, model and key differ.
-    // glm-4-flash is on the free tier.
-    //
-    // `response_format: {type: 'json_object'}` is deliberately NOT sent:
-    // this integration couldn't be tested against the live API from here, and
-    // an unsupported-parameter rejection would fail the whole call. The JSON
-    // shape is requested in the prompt instead and parsed defensively below.
-    const chatUrl = 'https://open.bigmodel.cn/api/paas/v4/chat/completions';
-    const chatModel = 'glm-4-flash';
-
-    // Never let a stalled upstream hang until the hosting gateway kills the
-    // request — that replaces our response with its own opaque error.
-    const timeoutController = new AbortController();
-    const timeoutId = setTimeout(() => timeoutController.abort(), 30_000);
-
-    let response: Response;
+    let content: string;
     try {
-      response = await fetch(chatUrl, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${apiKey}`,
-        },
-        body: JSON.stringify({
-          model: chatModel,
-          messages: [
-            { role: 'system', content: systemPrompt },
-            { role: 'user', content: userPrompt },
-          ],
-          temperature: 0.4,
-        }),
-        signal: timeoutController.signal,
+      content = await llmChat({
+        systemPrompt,
+        userPrompt,
+        temperature: 0.4,
+        jsonMode: true,
+        timeoutMs: 30_000,
       });
-    } catch (fetchError) {
-      const isTimeout = fetchError instanceof Error && fetchError.name === 'AbortError';
-      console.error(`Zhipu progress analysis ${isTimeout ? 'timed out' : 'network error'}:`, fetchError);
+    } catch (llmError) {
+      const isTimeout =
+        llmError instanceof Error && llmError.name === 'AbortError';
+      console.error(
+        `qwen3.5-flash progress analysis ${isTimeout ? 'timed out' : 'error'}:`,
+        llmError
+      );
+      // Fall back to rule-based analysis rather than failing the page
       const interviewText = interviewTranscripts.map((t) => t.answer).filter(Boolean).join(' ').toLowerCase();
       const practiceText = practiceTranscripts.map((t) => t.answer).filter(Boolean).join(' ').toLowerCase();
       return NextResponse.json({
         improvements: analyzeImprovementsRuleBased(interviewText, practiceText),
         fallback: true,
-        fallbackStage: isTimeout ? 'zhipu-timeout' : 'zhipu-network-error',
-      });
-    } finally {
-      clearTimeout(timeoutId);
-    }
-
-    if (!response.ok) {
-      const rawText = await response.text().catch(() => '');
-      console.error(`Zhipu progress analysis error (status ${response.status}):`, rawText.slice(0, 500));
-      // Fall back to rule-based analysis rather than failing the page, but
-      // report why so a misconfigured key is visible without server logs.
-      const interviewText = interviewTranscripts.map((t) => t.answer).filter(Boolean).join(' ').toLowerCase();
-      const practiceText = practiceTranscripts.map((t) => t.answer).filter(Boolean).join(' ').toLowerCase();
-      return NextResponse.json({
-        improvements: analyzeImprovementsRuleBased(interviewText, practiceText),
-        fallback: true,
-        fallbackStage: 'zhipu-provider-error',
-        providerStatus: response.status,
-        providerDetail: rawText.slice(0, 300),
+        fallbackStage: isTimeout ? 'llm-timeout' : 'llm-error',
       });
     }
 
-    const data = await response.json();
-    const content = data?.choices?.[0]?.message?.content;
-
+    // Parse the JSON response defensively — the model may wrap it in fences
     let improvements: string[] = [];
-    if (typeof content === 'string') {
-      // Without response_format enforcing the shape, the model may wrap the
-      // JSON in markdown fences or add a sentence around it. Strip fences,
-      // then fall back to extracting the outermost {...} or [...] before
-      // parsing. Accepts either {"improvements": [...]} or a bare array.
-      const stripped = content.replace(/```(?:json)?\s*/gi, '').replace(/```/g, '').trim();
-      const candidates = [stripped];
-      const objectMatch = stripped.match(/\{[\s\S]*\}/);
-      if (objectMatch) candidates.push(objectMatch[0]);
-      const arrayMatch = stripped.match(/\[[\s\S]*\]/);
-      if (arrayMatch) candidates.push(arrayMatch[0]);
+    const stripped = content.replace(/```(?:json)?\s*/gi, '').replace(/```/g, '').trim();
+    const candidates = [stripped];
+    const objectMatch = stripped.match(/\{[\s\S]*\}/);
+    if (objectMatch) candidates.push(objectMatch[0]);
+    const arrayMatch = stripped.match(/\[[\s\S]*\]/);
+    if (arrayMatch) candidates.push(arrayMatch[0]);
 
-      for (const candidate of candidates) {
-        try {
-          const parsed = JSON.parse(candidate);
-          const list = Array.isArray(parsed) ? parsed : parsed?.improvements;
-          if (Array.isArray(list)) {
-            improvements = list.filter((x: unknown): x is string => typeof x === 'string' && x.trim().length > 0);
-            if (improvements.length > 0) break;
-          }
-        } catch {
-          // try the next candidate
+    for (const candidate of candidates) {
+      try {
+        const parsed = JSON.parse(candidate);
+        const list = Array.isArray(parsed) ? parsed : parsed?.improvements;
+        if (Array.isArray(list)) {
+          improvements = list.filter((x: unknown): x is string => typeof x === 'string' && x.trim().length > 0);
+          if (improvements.length > 0) break;
         }
-      }
-      if (improvements.length === 0) {
-        console.error('Failed to parse Zhipu progress analysis response:', content.slice(0, 500));
+      } catch {
+        // try the next candidate
       }
     }
 
     if (improvements.length === 0) {
+      console.error('Failed to parse qwen3.5-flash progress analysis response:', content.slice(0, 500));
       const interviewText = interviewTranscripts.map((t) => t.answer).filter(Boolean).join(' ').toLowerCase();
       const practiceText = practiceTranscripts.map((t) => t.answer).filter(Boolean).join(' ').toLowerCase();
-      improvements = analyzeImprovementsRuleBased(interviewText, practiceText);
+      return NextResponse.json({
+        improvements: analyzeImprovementsRuleBased(interviewText, practiceText),
+        fallback: true,
+        fallbackStage: 'parse-error',
+      });
     }
 
     return NextResponse.json({ improvements });
   } catch (error) {
-    console.error('analyze-progress error:', error);
-    return NextResponse.json(
-      { error: 'Could not analyze progress. Please try again.' },
-      { status: 500 }
-    );
+    console.error('Analyze progress error:', error);
+    return NextResponse.json({
+      improvements: [],
+      error: error instanceof Error ? error.message : String(error),
+    });
   }
 }

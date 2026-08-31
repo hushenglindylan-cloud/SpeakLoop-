@@ -1,11 +1,61 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { mockEvaluation } from '@/lib/mock/data';
 import { StepIndicator } from '@/components/step-indicator';
-import { getAllTranscripts } from '@/lib/store/interview-session';
+import { getAllTranscripts, getSession } from '@/lib/store/interview-session';
+import { examiners } from '@/lib/mock/data';
+
+// ---------------------------------------------------------------------------
+// Types matching API responses
+// ---------------------------------------------------------------------------
+
+interface CriterionAnalysis {
+  band: number;
+  evidence: string;
+  rationale: string;
+  audioEvidenceAvailable?: boolean;
+}
+
+interface ImprovedAnswer {
+  questionIndex: number;
+  question: string;
+  originalSummary: string;
+  improvedVersion: string;
+}
+
+// Core evaluation — returned by Fast Evaluation API
+interface CoreEvaluationData {
+  scores: {
+    fluencyCoherence: number;
+    lexicalResource: number;
+    grammaticalRange: number;
+    pronunciation: number;
+  };
+  overallBand: number;
+  mainWeakness: string;
+  improvementFocus: string;
+  mock?: boolean;
+  fallback?: boolean;
+}
+
+// Detailed evaluation — returned by Detailed Evaluation API
+interface DetailedEvaluationData {
+  criteriaAnalysis: {
+    fluencyCoherence: CriterionAnalysis;
+    lexicalResource: CriterionAnalysis;
+    grammaticalRange: CriterionAnalysis;
+    pronunciation: CriterionAnalysis;
+  };
+  improvedAnswers: ImprovedAnswer[];
+  mock?: boolean;
+  fallback?: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// UI Components
+// ---------------------------------------------------------------------------
 
 function AnimatedScore({ target, duration = 1500 }: { target: number; duration?: number }) {
   const [value, setValue] = useState(0);
@@ -17,8 +67,6 @@ function AnimatedScore({ target, duration = 1500 }: { target: number; duration?:
       const progress = Math.min(elapsed / duration, 1);
       const eased = 1 - Math.pow(1 - progress, 3);
       const current = eased * target;
-      // For individual scores (integers), show as integer
-      // For overall (can be .5), show with .5 precision
       if (target % 1 === 0) {
         setValue(Math.round(current));
       } else {
@@ -32,8 +80,15 @@ function AnimatedScore({ target, duration = 1500 }: { target: number; duration?:
   return <span className="tabular-nums">{value % 1 === 0 ? value.toFixed(0) : value.toFixed(1)}</span>;
 }
 
-function ScoreBar({ label, score, color }: { label: string; score: number; color: string }) {
+function ScoreBar({ label, score, color, analysis }: {
+  label: string;
+  score: number;
+  color: string;
+  analysis?: CriterionAnalysis;
+}) {
+  const [expanded, setExpanded] = useState(false);
   const percentage = (score / 9) * 100;
+
   return (
     <div className="space-y-2">
       <div className="flex items-center justify-between">
@@ -48,6 +103,30 @@ function ScoreBar({ label, score, color }: { label: string; score: number; color
           style={{ width: `${percentage}%` }}
         />
       </div>
+      {analysis && (
+        <button
+          type="button"
+          onClick={() => setExpanded(!expanded)}
+          className="text-xs text-slate-400 hover:text-slate-600 transition-colors"
+        >
+          {expanded ? 'Hide details ▲' : 'Show details ▼'}
+        </button>
+      )}
+      {expanded && analysis && (
+        <div className="rounded-lg bg-slate-50 p-3 space-y-1.5">
+          <p className="text-xs text-slate-600">
+            <span className="font-medium">Evidence:</span> {analysis.evidence}
+          </p>
+          <p className="text-xs text-slate-500">
+            <span className="font-medium">Rationale:</span> {analysis.rationale}
+          </p>
+          {analysis.audioEvidenceAvailable === false && (
+            <p className="text-xs text-amber-600 italic">
+              Note: Audio-level pronunciation analysis not available. Score based on transcript evidence only.
+            </p>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -64,19 +143,316 @@ function getScoreColor(score: number): string {
   return scoreColors.low;
 }
 
+// ---------------------------------------------------------------------------
+// Loading skeleton for core evaluation
+// ---------------------------------------------------------------------------
+
+function CoreLoadingState() {
+  return (
+    <main className="mx-auto max-w-5xl px-6 py-12">
+      <div className="mb-10 text-center">
+        <h1 className="mb-3 text-3xl font-bold text-slate-900">Your Evaluation</h1>
+        <p className="text-slate-500">Analyzing your performance...</p>
+      </div>
+      <div className="grid gap-8 lg:grid-cols-3">
+        <div className="lg:col-span-1">
+          <div className="rounded-2xl border border-slate-100 bg-slate-50 p-8">
+            <div className="animate-pulse space-y-4">
+              <div className="mx-auto h-4 w-24 rounded bg-slate-200" />
+              <div className="mx-auto h-16 w-32 rounded bg-slate-200" />
+              <div className="space-y-3">
+                {[1, 2, 3, 4].map((i) => (
+                  <div key={i} className="space-y-2">
+                    <div className="h-3 w-20 rounded bg-slate-200" />
+                    <div className="h-2.5 w-full rounded-full bg-slate-200" />
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        </div>
+        <div className="lg:col-span-2 space-y-6">
+          <div className="rounded-2xl border border-slate-100 bg-white p-8">
+            <div className="animate-pulse space-y-4">
+              {[1, 2, 3, 4].map((i) => (
+                <div key={i} className="h-12 rounded bg-slate-100" />
+              ))}
+            </div>
+          </div>
+        </div>
+      </div>
+    </main>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Loading skeleton for detailed evaluation sections
+// ---------------------------------------------------------------------------
+
+function DetailedLoadingSkeleton() {
+  return (
+    <div className="animate-pulse space-y-4">
+      {[1, 2, 3].map((i) => (
+        <div key={i} className="h-16 rounded-lg bg-slate-100" />
+      ))}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Main page
+// ---------------------------------------------------------------------------
+
 export default function EvaluationPage() {
   const router = useRouter();
-  const { scores, evidence } = mockEvaluation;
-  
-  // Get student's actual answers from interview session
   const transcripts = getAllTranscripts();
 
+  // Two-phase state
+  const [coreEvaluation, setCoreEvaluation] = useState<CoreEvaluationData | null>(null);
+  const [detailedEvaluation, setDetailedEvaluation] = useState<DetailedEvaluationData | null>(null);
+  const [coreLoading, setCoreLoading] = useState(true);
+  const [detailsLoading, setDetailsLoading] = useState(false);
+  const [coreError, setCoreError] = useState<string | null>(null);
+  const [detailsError, setDetailsError] = useState<string | null>(null);
+
+  // Race condition guards
+  const hasRequestedCoreRef = useRef(false);
+  const hasRequestedDetailsRef = useRef(false);
+  const coreFetchSeqRef = useRef(0);
+  const detailsFetchSeqRef = useRef(0);
+
+  // Build examiner context helper
+  const getExaminerContext = useCallback(() => {
+    const currentSession = getSession();
+    const examinerContext = currentSession?.examinerId
+      ? examiners.find((e) => e.id === currentSession.examinerId)
+      : undefined;
+    return examinerContext
+      ? {
+          name: examinerContext.name,
+          personality: examinerContext.personality,
+          difficulty: examinerContext.difficulty,
+        }
+      : undefined;
+  }, []);
+
+  // Phase 1: Fast Evaluation (core scores)
+  const runCoreEvaluation = useCallback(async () => {
+    const currentTranscripts = getAllTranscripts();
+
+    if (currentTranscripts.length === 0) {
+      setCoreLoading(false);
+      return;
+    }
+
+    const seq = ++coreFetchSeqRef.current;
+    setCoreLoading(true);
+    setCoreError(null);
+
+    try {
+      const response = await fetch('/api/evaluate-interview', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          transcripts: currentTranscripts,
+          examiner: getExaminerContext(),
+        }),
+      });
+
+      const data = await response.json();
+      if (coreFetchSeqRef.current !== seq) return;
+
+      if (!data?.scores || typeof data.scores.fluencyCoherence !== 'number') {
+        setCoreError(data?.error || 'Evaluation failed. Please try again.');
+      } else {
+        setCoreEvaluation(data);
+        // Save core evaluation data for Practice and Final Evaluation pages
+        try {
+          // For Practice page (weakness + improvementFocus + criteriaScores)
+          localStorage.setItem('speakloop_last_evaluation', JSON.stringify({
+            weakness: data.mainWeakness,
+            improvementFocus: data.improvementFocus,
+            criteriaScores: data.scores,
+          }));
+          // For Final Evaluation page (full core evaluation)
+          localStorage.setItem('speakloop_evaluation_core', JSON.stringify({
+            scores: data.scores,
+            overallBand: data.overallBand,
+            mainWeakness: data.mainWeakness,
+            improvementFocus: data.improvementFocus,
+          }));
+        } catch {
+          // localStorage may not be available
+        }
+      }
+    } catch (err) {
+      console.error('Failed to fetch core evaluation:', err);
+      if (coreFetchSeqRef.current !== seq) return;
+      setCoreError('Failed to load evaluation. Please try again.');
+    } finally {
+      if (coreFetchSeqRef.current === seq) setCoreLoading(false);
+    }
+  }, [getExaminerContext]);
+
+  // Phase 2: Detailed Evaluation (criteria analysis + improved answers)
+  const runDetailedEvaluation = useCallback(async (coreData: CoreEvaluationData) => {
+    const currentTranscripts = getAllTranscripts();
+
+    if (currentTranscripts.length === 0) return;
+
+    const seq = ++detailsFetchSeqRef.current;
+    setDetailsLoading(true);
+    setDetailsError(null);
+
+    try {
+      const response = await fetch('/api/evaluate-interview-details', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          transcripts: currentTranscripts,
+          examiner: getExaminerContext(),
+          coreEvaluation: {
+            scores: coreData.scores,
+            overallBand: coreData.overallBand,
+            mainWeakness: coreData.mainWeakness,
+            improvementFocus: coreData.improvementFocus,
+          },
+        }),
+      });
+
+      const data = await response.json();
+      if (detailsFetchSeqRef.current !== seq) return;
+
+      if (!data?.criteriaAnalysis || typeof data.criteriaAnalysis !== 'object') {
+        setDetailsError('Unable to load detailed analysis.');
+      } else {
+        setDetailedEvaluation(data);
+      }
+    } catch (err) {
+      console.error('Failed to fetch detailed evaluation:', err);
+      if (detailsFetchSeqRef.current !== seq) return;
+      setDetailsError('Unable to load detailed analysis.');
+    } finally {
+      if (detailsFetchSeqRef.current === seq) setDetailsLoading(false);
+    }
+  }, [getExaminerContext]);
+
+  // Start core evaluation on mount
+  useEffect(() => {
+    if (hasRequestedCoreRef.current) return;
+    hasRequestedCoreRef.current = true;
+    runCoreEvaluation();
+  }, [runCoreEvaluation]);
+
+  // Start detailed evaluation when core is available
+  useEffect(() => {
+    if (!coreEvaluation || hasRequestedDetailsRef.current) return;
+    hasRequestedDetailsRef.current = true;
+    runDetailedEvaluation(coreEvaluation);
+  }, [coreEvaluation, runDetailedEvaluation]);
+
+  // Retry handler for core evaluation
+  const retryCoreEvaluation = useCallback(() => {
+    hasRequestedCoreRef.current = false;
+    hasRequestedDetailsRef.current = false;
+    setDetailedEvaluation(null);
+    setDetailsError(null);
+    runCoreEvaluation();
+  }, [runCoreEvaluation]);
+
+  // Retry handler for detailed evaluation
+  const retryDetailedEvaluation = useCallback(() => {
+    if (!coreEvaluation) return;
+    hasRequestedDetailsRef.current = false;
+    setDetailsError(null);
+    runDetailedEvaluation(coreEvaluation);
+  }, [coreEvaluation, runDetailedEvaluation]);
+
+  // Core loading state — full page loader
+  if (coreLoading) {
+    return (
+      <div className="min-h-screen bg-white">
+        <header className="border-b border-slate-100 bg-white/80 backdrop-blur-sm">
+          <div className="mx-auto flex h-16 max-w-6xl items-center justify-between px-6">
+            <Link href="/" className="flex items-center gap-2">
+              <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-[#DA291C]">
+                <svg className="h-4 w-4 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
+                </svg>
+              </div>
+              <span className="text-lg font-semibold text-slate-500">SpeakLoop</span>
+            </Link>
+            <StepIndicator />
+          </div>
+        </header>
+        <CoreLoadingState />
+      </div>
+    );
+  }
+
+  // Core error state — show error with retry
+  if (coreError || !coreEvaluation) {
+    return (
+      <div className="min-h-screen bg-white">
+        <header className="border-b border-slate-100 bg-white/80 backdrop-blur-sm">
+          <div className="mx-auto flex h-16 max-w-6xl items-center justify-between px-6">
+            <Link href="/" className="flex items-center gap-2">
+              <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-[#DA291C]">
+                <svg className="h-4 w-4 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
+                </svg>
+              </div>
+              <span className="text-lg font-semibold text-slate-500">SpeakLoop</span>
+            </Link>
+            <StepIndicator />
+          </div>
+        </header>
+        <main className="mx-auto max-w-5xl px-6 py-12 text-center">
+          <h1 className="mb-3 text-3xl font-bold text-slate-900">Your Evaluation</h1>
+          <p className="text-slate-500 mb-6">
+            {coreError || 'No recordings available. Please complete the interview first.'}
+          </p>
+          {coreError && transcripts.length > 0 ? (
+            <div className="flex flex-col items-center gap-3">
+              <button
+                onClick={retryCoreEvaluation}
+                className="inline-flex rounded-xl bg-[#DA291C] px-8 py-3 text-base font-semibold text-white transition-all hover:bg-[#B91C1C]"
+              >
+                Retry Evaluation
+              </button>
+              <Link href="/interview" className="text-sm font-medium text-slate-500 hover:text-slate-700">
+                Or start a new interview
+              </Link>
+            </div>
+          ) : (
+            <Link
+              href="/interview"
+              className="inline-flex rounded-xl bg-[#DA291C] px-8 py-3 text-base font-semibold text-white transition-all hover:bg-[#B91C1C]"
+            >
+              Go to Interview
+            </Link>
+          )}
+        </main>
+      </div>
+    );
+  }
+
+  const { scores, overallBand } = coreEvaluation;
+  const criteriaAnalysis = detailedEvaluation?.criteriaAnalysis;
+  const improvedAnswers = detailedEvaluation?.improvedAnswers;
+
   const criteria = [
-    { label: 'Fluency & Coherence', score: scores.fluencyCoherence },
-    { label: 'Lexical Resource', score: scores.lexicalResource },
-    { label: 'Grammatical Range & Accuracy', score: scores.grammaticalRange },
-    { label: 'Pronunciation', score: scores.pronunciation },
+    { key: 'fluencyCoherence' as const, label: 'Fluency & Coherence', score: scores.fluencyCoherence },
+    { key: 'lexicalResource' as const, label: 'Lexical Resource', score: scores.lexicalResource },
+    { key: 'grammaticalRange' as const, label: 'Grammatical Range & Accuracy', score: scores.grammaticalRange },
+    { key: 'pronunciation' as const, label: 'Pronunciation', score: scores.pronunciation },
   ];
+
+  // Build evidence list from criteriaAnalysis (if available)
+  const evidenceList = criteria.map((c) => {
+    const analysis = criteriaAnalysis?.[c.key];
+    return analysis?.evidence || `${c.label}: Band ${c.score}`;
+  });
 
   return (
     <div className="min-h-screen bg-white">
@@ -104,6 +480,11 @@ export default function EvaluationPage() {
           <p className="text-slate-500">
             Detailed analysis of your Part 3 performance
           </p>
+          {coreEvaluation.mock && (
+            <p className="mt-2 text-xs text-amber-600">
+              Demo mode: Configure DASHSCOPE_API_KEY for AI-powered evaluation
+            </p>
+          )}
         </div>
 
         <div className="grid gap-8 lg:grid-cols-3">
@@ -114,7 +495,7 @@ export default function EvaluationPage() {
                 Overall Band Score
               </div>
               <div className="mb-4 text-6xl font-bold text-[#DA291C]">
-                <AnimatedScore target={scores.overallBand} />
+                <AnimatedScore target={overallBand} />
               </div>
               <p className="mb-4 text-xs text-slate-400">
                 Individual scores are integers (1-9). Overall band is rounded down to nearest 0.5.
@@ -124,10 +505,11 @@ export default function EvaluationPage() {
               <div className="space-y-4 text-left">
                 {criteria.map((c) => (
                   <ScoreBar
-                    key={c.label}
+                    key={c.key}
                     label={c.label}
                     score={c.score}
                     color={getScoreColor(c.score)}
+                    analysis={criteriaAnalysis?.[c.key]}
                   />
                 ))}
               </div>
@@ -145,7 +527,7 @@ export default function EvaluationPage() {
                 Evidence
               </h2>
               <div className="space-y-4">
-                {evidence.map((item, i) => (
+                {evidenceList.map((item, i) => (
                   <div key={i} className="flex gap-3 rounded-xl bg-slate-50 p-4">
                     <div className="mt-0.5 flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full bg-[#DA291C]/10 text-[10px] font-bold text-[#DA291C]">
                       {i + 1}
@@ -158,7 +540,7 @@ export default function EvaluationPage() {
               </div>
             </div>
 
-            {/* Answer Review - Interleaved Questions, Answers, and Improvements */}
+            {/* Answer Review with AI Improvements */}
             <div className="rounded-2xl border border-slate-200 bg-white p-8">
               <h2 className="mb-6 flex items-center gap-2 text-lg font-semibold text-slate-900">
                 <svg className="h-5 w-5 text-[#DA291C]" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
@@ -166,20 +548,40 @@ export default function EvaluationPage() {
                 </svg>
                 Your Interview Review
               </h2>
-              
+
+              {/* Detailed evaluation loading/error state */}
+              {detailsLoading && (
+                <div className="mb-6 rounded-xl bg-slate-50 border border-slate-100 p-4">
+                  <div className="flex items-center gap-2 mb-3">
+                    <div className="h-4 w-4 animate-spin rounded-full border-2 border-slate-300 border-t-[#DA291C]" />
+                    <p className="text-sm text-slate-500">Preparing detailed analysis...</p>
+                  </div>
+                  <DetailedLoadingSkeleton />
+                </div>
+              )}
+
+              {detailsError && !detailsLoading && (
+                <div className="mb-6 rounded-xl bg-amber-50 border border-amber-100 p-4">
+                  <p className="text-sm text-amber-700 mb-2">{detailsError}</p>
+                  <button
+                    onClick={retryDetailedEvaluation}
+                    className="text-xs font-medium text-amber-800 hover:text-amber-900 underline"
+                  >
+                    Try again
+                  </button>
+                </div>
+              )}
+
               <div className="space-y-6">
                 {transcripts.length > 0 ? (
                   transcripts.map((t, idx) => {
-                    // Get the question label
-                    const questionLabel = t.questionType === 'followup' 
+                    const questionLabel = t.questionType === 'followup'
                       ? 'Follow-up'
-                      : `Q${Math.floor(idx / 2) + 1}`;
-                    
-                    // Generate improved version based on student's answer
-                    const improvedText = t.answer.length > 0 
-                      ? `[Improved version - more natural expressions, better vocabulary, clearer structure]`
-                      : '';
-                    
+                      : `Q${transcripts.slice(0, idx).filter((x) => x.questionType === 'main').length + 1}`;
+
+                    // Find matching improved answer from API
+                    const improved = improvedAnswers?.find((a) => a.questionIndex === idx);
+
                     return (
                       <div key={idx} className="space-y-3">
                         {/* Question */}
@@ -189,7 +591,7 @@ export default function EvaluationPage() {
                             {t.question}
                           </p>
                         </div>
-                        
+
                         {/* Student's Answer */}
                         <div>
                           <h4 className="mb-1.5 text-xs font-semibold text-slate-600">Your answer:</h4>
@@ -199,19 +601,19 @@ export default function EvaluationPage() {
                             </p>
                           </div>
                         </div>
-                        
-                        {/* Improved Version */}
-                        {improvedText && (
+
+                        {/* Improved Version (from AI) — only show when available */}
+                        {improved && !detailsLoading && (
                           <div>
                             <h4 className="mb-1.5 text-xs font-semibold text-emerald-700">Improved version:</h4>
                             <div className="rounded-lg bg-emerald-50 border border-emerald-100 p-4">
                               <p className="text-sm leading-relaxed text-emerald-800">
-                                {improvedText}
+                                {improved.improvedVersion}
                               </p>
                             </div>
                           </div>
                         )}
-                        
+
                         {/* Divider between Q and Follow-up */}
                         {idx < transcripts.length - 1 && t.questionType === 'main' && (
                           <div className="border-t border-dashed border-slate-200 pt-3" />

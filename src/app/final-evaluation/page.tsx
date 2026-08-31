@@ -1,10 +1,55 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
-import { mockBeforeScores, mockAfterScores } from '@/lib/mock/data';
 import { StepIndicator } from '@/components/step-indicator';
-import { getAllTranscripts, getAllPracticeTranscripts } from '@/lib/store/interview-session';
+import { getAllTranscripts, getAllPracticeTranscripts, getSession } from '@/lib/store/interview-session';
+import { examiners } from '@/lib/mock/data';
+
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
+
+interface CoreEvaluation {
+  scores: {
+    fluencyCoherence: number;
+    lexicalResource: number;
+    grammaticalRange: number;
+    pronunciation: number;
+  };
+  overallBand: number;
+  mainWeakness?: string;
+  improvementFocus?: string;
+}
+
+interface PracticeFocus {
+  weakness: string;
+  improvementFocus: string;
+}
+
+interface ProgressArea {
+  area: string;
+  observation: string;
+  evidence: string;
+}
+
+interface ProgressAnalysis {
+  progress: {
+    improved: boolean;
+    areas: ProgressArea[];
+  };
+  remainingFocus: {
+    area: string;
+    observation: string;
+  };
+  nextStep: string;
+  summary: string;
+  mock?: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// Animated Number Component
+// ---------------------------------------------------------------------------
 
 function AnimatedNumber({ target, duration = 1500 }: { target: number; duration?: number }) {
   const [value, setValue] = useState(0);
@@ -24,62 +69,178 @@ function AnimatedNumber({ target, duration = 1500 }: { target: number; duration?
   return <span className="tabular-nums">{value.toFixed(1)}</span>;
 }
 
-interface ScoreRowProps {
-  label: string;
-  before: number;
-  after: number;
-}
+// ---------------------------------------------------------------------------
+// Score Card Component
+// ---------------------------------------------------------------------------
 
-function ScoreRow({ label, before, after }: ScoreRowProps) {
-  const improvement = after - before;
-  const isPositive = improvement > 0;
-
+function ScoreCard({ label, score }: { label: string; score: number }) {
   return (
-    <div className="grid grid-cols-[1fr_auto_auto_auto_auto] items-center gap-4 rounded-xl border border-slate-100 bg-white px-6 py-4">
-      <span className="text-sm font-medium text-slate-700">{label}</span>
-      <div className="text-center">
-        <div className="text-xs text-slate-400">Before</div>
-        <div className="text-lg font-bold tabular-nums text-slate-400">
-          <AnimatedNumber target={before} />
-        </div>
-      </div>
-      <div className="flex items-center">
-        <svg className="h-5 w-5 text-slate-300" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-          <path strokeLinecap="round" strokeLinejoin="round" d="M13 7l5 5m0 0l-5 5m5-5H6" />
-        </svg>
-      </div>
-      <div className="text-center">
-        <div className="text-xs text-slate-400">After</div>
-        <div className="text-lg font-bold tabular-nums text-slate-900">
-          <AnimatedNumber target={after} />
-        </div>
-      </div>
-      <div className="text-center">
-        <div className="text-xs text-slate-400">Change</div>
-        <div
-          className={`text-lg font-bold tabular-nums ${
-            isPositive ? 'text-emerald-600' : 'text-slate-400'
-          }`}
-        >
-          {isPositive ? '+' : ''}
-          <AnimatedNumber target={improvement} />
-        </div>
+    <div className="rounded-xl border border-slate-100 bg-white px-5 py-4 text-center">
+      <div className="text-xs font-medium text-slate-500 mb-1">{label}</div>
+      <div className="text-2xl font-bold text-slate-900">
+        <AnimatedNumber target={score} />
       </div>
     </div>
   );
 }
 
-export default function FinalEvaluationPage() {
-  const rows: ScoreRowProps[] = [
-    { label: 'Fluency & Coherence', before: mockBeforeScores.fluencyCoherence, after: mockAfterScores.fluencyCoherence },
-    { label: 'Lexical Resource', before: mockBeforeScores.lexicalResource, after: mockAfterScores.lexicalResource },
-    { label: 'Grammatical Range & Accuracy', before: mockBeforeScores.grammaticalRange, after: mockAfterScores.grammaticalRange },
-    { label: 'Pronunciation', before: mockBeforeScores.pronunciation, after: mockAfterScores.pronunciation },
-  ];
+// ---------------------------------------------------------------------------
+// Main Page Component
+// ---------------------------------------------------------------------------
 
-  const overallBefore = mockBeforeScores.overallBand;
-  const overallAfter = mockAfterScores.overallBand;
-  const overallImprovement = overallAfter - overallBefore;
+export default function FinalEvaluationPage() {
+  const [coreEvaluation, setCoreEvaluation] = useState<CoreEvaluation | null>(null);
+  const [practiceFocus, setPracticeFocus] = useState<PracticeFocus | null>(null);
+  const [progressAnalysis, setProgressAnalysis] = useState<ProgressAnalysis | null>(null);
+  const [progressLoading, setProgressLoading] = useState(true);
+  const [progressError, setProgressError] = useState<string | null>(null);
+
+  // Single-flight guard to prevent duplicate requests
+  const hasRequestedRef = useRef(false);
+  const fetchSeqRef = useRef(0);
+
+  // Load existing evaluation data from localStorage
+  useEffect(() => {
+    // Load core evaluation
+    const evalData = localStorage.getItem('speakloop_evaluation_core');
+    if (evalData) {
+      try {
+        const parsed = JSON.parse(evalData);
+        setCoreEvaluation(parsed);
+      } catch {
+        console.error('Failed to parse core evaluation from localStorage');
+      }
+    }
+
+    // Load practice focus
+    const evalForPractice = localStorage.getItem('speakloop_last_evaluation');
+    if (evalForPractice) {
+      try {
+        const parsed = JSON.parse(evalForPractice);
+        setPracticeFocus({
+          weakness: parsed.weakness || '',
+          improvementFocus: parsed.improvementFocus || '',
+        });
+      } catch {
+        console.error('Failed to parse practice focus from localStorage');
+      }
+    }
+  }, []);
+
+  // Fetch progress analysis
+  useEffect(() => {
+    if (hasRequestedRef.current) return;
+    hasRequestedRef.current = true;
+
+    const currentSeq = ++fetchSeqRef.current;
+
+    async function fetchProgressAnalysis() {
+      const interviewTranscripts = getAllTranscripts();
+      const practiceTranscripts = getAllPracticeTranscripts();
+
+      if (interviewTranscripts.length === 0 || practiceTranscripts.length === 0) {
+        setProgressError('No transcripts found. Please complete both interview and practice sessions.');
+        setProgressLoading(false);
+        return;
+      }
+
+      const session = getSession();
+      const examiner = session?.examinerId
+        ? examiners.find((e) => e.id === session.examinerId)
+        : undefined;
+
+      // Get core evaluation from localStorage
+      const evalData = localStorage.getItem('speakloop_evaluation_core');
+      let coreEval: CoreEvaluation | undefined;
+      if (evalData) {
+        try {
+          coreEval = JSON.parse(evalData);
+        } catch {
+          // Ignore parse errors
+        }
+      }
+
+      // Get practice focus from localStorage
+      const evalForPractice = localStorage.getItem('speakloop_last_evaluation');
+      let pFocus: PracticeFocus | undefined;
+      if (evalForPractice) {
+        try {
+          const parsed = JSON.parse(evalForPractice);
+          pFocus = {
+            weakness: parsed.weakness || '',
+            improvementFocus: parsed.improvementFocus || '',
+          };
+        } catch {
+          // Ignore parse errors
+        }
+      }
+
+      try {
+        const res = await fetch('/api/final-evaluation', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            interviewTranscripts,
+            practiceTranscripts,
+            coreEvaluation: coreEval,
+            practiceFocus: pFocus,
+            examiner: examiner
+              ? { name: examiner.name, personality: examiner.personality, difficulty: examiner.difficulty }
+              : undefined,
+          }),
+        });
+
+        // Race condition check
+        if (currentSeq !== fetchSeqRef.current) return;
+
+        const result = await res.json();
+
+        if (result.error) {
+          setProgressError(result.error);
+        } else {
+          setProgressAnalysis(result);
+        }
+      } catch (err) {
+        if (currentSeq !== fetchSeqRef.current) return;
+        console.error('Failed to fetch progress analysis:', err);
+        setProgressError('Failed to load progress analysis. Please try again.');
+      } finally {
+        if (currentSeq === fetchSeqRef.current) {
+          setProgressLoading(false);
+        }
+      }
+    }
+
+    fetchProgressAnalysis();
+  }, []);
+
+  // ---------------------------------------------------------------------------
+  // Render
+  // ---------------------------------------------------------------------------
+
+  // Check if we have minimum data to show anything
+  const hasCoreEvaluation = coreEvaluation !== null;
+  const hasTranscripts = getAllTranscripts().length > 0 && getAllPracticeTranscripts().length > 0;
+
+  if (!hasTranscripts && !progressLoading) {
+    return (
+      <div className="min-h-screen bg-[#fafaf9]">
+        <header className="border-b border-slate-100 bg-white/80 backdrop-blur-sm">
+          <div className="mx-auto flex h-16 max-w-6xl items-center justify-between px-6">
+            <Link href="/" className="text-lg font-semibold text-slate-500">SpeakLoop</Link>
+            <StepIndicator />
+          </div>
+        </header>
+        <main className="mx-auto max-w-4xl px-6 py-12">
+          <div className="text-center py-20">
+            <p className="text-slate-700 font-medium mb-4">No transcripts found</p>
+            <p className="text-slate-500 text-sm mb-6">Please complete both interview and practice sessions first.</p>
+            <Link href="/" className="text-[#DA291C] text-sm font-medium hover:underline">← Back to home</Link>
+          </div>
+        </main>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-[#fafaf9]">
@@ -105,63 +266,150 @@ export default function FinalEvaluationPage() {
             Final Evaluation
           </h1>
           <p className="text-slate-500">
-            Your progress from initial assessment to final performance
+            Your learning progress summary
           </p>
         </div>
 
-        {/* Overall Comparison */}
-        <div className="mb-10 rounded-2xl border border-slate-100 bg-white p-8">
-          <div className="grid grid-cols-3 items-center gap-8">
-            {/* Before */}
-            <div className="text-center">
-              <div className="mb-2 text-sm font-medium text-slate-400">
-                Before Practice
-              </div>
-              <div className="text-5xl font-bold text-slate-300">
-                <AnimatedNumber target={overallBefore} />
-              </div>
-              <div className="mt-2 text-xs text-slate-400">Initial Assessment</div>
+        {/* Initial Assessment Scores */}
+        {hasCoreEvaluation && (
+          <div className="mb-10 rounded-2xl border border-slate-100 bg-white p-8">
+            <div className="mb-6 flex items-center justify-between">
+              <h2 className="text-lg font-semibold text-slate-900">Initial Assessment</h2>
+              <span className="text-xs text-slate-400">From your interview</span>
             </div>
-
-            {/* Arrow */}
-            <div className="text-center">
-              <div className="mx-auto mb-3 flex h-16 w-16 items-center justify-center rounded-full bg-emerald-50">
-                <svg className="h-8 w-8 text-emerald-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M13 7l5 5m0 0l-5 5m5-5H6" />
-                </svg>
-              </div>
-              <div className="rounded-full bg-emerald-50 px-4 py-1.5 text-sm font-bold text-emerald-700">
-                +{overallImprovement.toFixed(1)} Band Improvement
-              </div>
-            </div>
-
-            {/* After */}
-            <div className="text-center">
-              <div className="mb-2 text-sm font-medium text-slate-400">
-                After Practice
-              </div>
+            
+            {/* Overall Band */}
+            <div className="mb-6 text-center">
+              <div className="text-sm font-medium text-slate-500 mb-2">Overall Band</div>
               <div className="text-5xl font-bold text-[#DA291C]">
-                <AnimatedNumber target={overallAfter} />
+                <AnimatedNumber target={coreEvaluation!.overallBand} />
               </div>
-              <div className="mt-2 text-xs text-slate-400">Final Assessment</div>
+            </div>
+
+            {/* Criterion Scores */}
+            <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+              <ScoreCard label="Fluency" score={coreEvaluation!.scores.fluencyCoherence} />
+              <ScoreCard label="Vocabulary" score={coreEvaluation!.scores.lexicalResource} />
+              <ScoreCard label="Grammar" score={coreEvaluation!.scores.grammaticalRange} />
+              <ScoreCard label="Pronunciation" score={coreEvaluation!.scores.pronunciation} />
             </div>
           </div>
-        </div>
+        )}
 
-        {/* Detailed Comparison */}
-        <div className="mb-10">
-          <h2 className="mb-5 text-lg font-semibold text-slate-900">
-            Detailed Score Comparison
-          </h2>
-          <div className="space-y-3">
-            {rows.map((row) => (
-              <ScoreRow key={row.label} {...row} />
-            ))}
+        {/* Practice Focus */}
+        {practiceFocus && (practiceFocus.weakness || practiceFocus.improvementFocus) && (
+          <div className="mb-10 rounded-2xl border border-slate-200 bg-white p-8">
+            <h2 className="mb-4 flex items-center gap-2 text-lg font-semibold text-slate-900">
+              <svg className="h-5 w-5 text-[#DA291C]" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z" />
+              </svg>
+              Practice Focus
+            </h2>
+            <div className="space-y-3">
+              {practiceFocus.weakness && (
+                <div>
+                  <div className="text-xs font-medium text-slate-500 mb-1">Target Area</div>
+                  <p className="text-sm text-slate-700">{practiceFocus.weakness}</p>
+                </div>
+              )}
+              {practiceFocus.improvementFocus && (
+                <div>
+                  <div className="text-xs font-medium text-slate-500 mb-1">Improvement Goal</div>
+                  <p className="text-sm text-slate-700">{practiceFocus.improvementFocus}</p>
+                </div>
+              )}
+            </div>
           </div>
-        </div>
+        )}
 
-        {/* Interview vs Practice Comparison */}
-        <AnswerComparison />
+        {/* Progress Analysis */}
+        <div className="mb-10 rounded-2xl border border-slate-200 bg-white p-8">
+          <h2 className="mb-6 flex items-center gap-2 text-lg font-semibold text-slate-900">
+            <svg className="h-5 w-5 text-[#DA291C]" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6" />
+            </svg>
+            Your Progress
+          </h2>
+
+          {progressLoading && (
+            <div className="space-y-4">
+              <div className="space-y-3">
+                {[0, 1, 2].map((i) => (
+                  <div key={i} className="h-4 animate-pulse rounded bg-slate-100" style={{ width: `${85 - i * 10}%` }} />
+                ))}
+              </div>
+              <p className="text-xs text-slate-400">Analyzing your progress…</p>
+            </div>
+          )}
+
+          {progressError && !progressLoading && (
+            <div className="text-center py-8">
+              <p className="text-slate-600 mb-4">{progressError}</p>
+              <button
+                onClick={() => window.location.reload()}
+                className="rounded-lg bg-slate-100 px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-200 transition-colors"
+              >
+                Try Again
+              </button>
+            </div>
+          )}
+
+          {progressAnalysis && !progressLoading && (
+            <div className="space-y-6">
+              {/* Summary */}
+              <div className="rounded-xl bg-slate-50 p-4">
+                <p className="text-sm text-slate-700 leading-relaxed">{progressAnalysis.summary}</p>
+                {progressAnalysis.mock && (
+                  <p className="mt-2 text-xs text-amber-600">
+                    Mock analysis — API key not configured.
+                  </p>
+                )}
+              </div>
+
+              {/* Progress Areas */}
+              {progressAnalysis.progress.areas.length > 0 && (
+                <div>
+                  <h3 className="mb-3 text-sm font-semibold text-slate-900">
+                    {progressAnalysis.progress.improved ? 'What Improved' : 'Observations'}
+                  </h3>
+                  <ol className="space-y-3">
+                    {progressAnalysis.progress.areas.map((area, idx) => (
+                      <li key={idx} className="flex gap-3">
+                        <span className="flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-full bg-emerald-100 text-xs font-semibold text-emerald-700">
+                          {idx + 1}
+                        </span>
+                        <div className="flex-1">
+                          <p className="text-sm font-medium text-slate-800">{area.area}</p>
+                          <p className="text-sm text-slate-600">{area.observation}</p>
+                          {area.evidence && (
+                            <p className="mt-1 text-xs text-slate-500 italic">Evidence: {area.evidence}</p>
+                          )}
+                        </div>
+                      </li>
+                    ))}
+                  </ol>
+                </div>
+              )}
+
+              {/* Remaining Focus */}
+              <div>
+                <h3 className="mb-2 text-sm font-semibold text-slate-900">Still Focus On</h3>
+                <div className="rounded-xl border border-amber-100 bg-amber-50 p-4">
+                  <p className="text-sm font-medium text-amber-800">{progressAnalysis.remainingFocus.area}</p>
+                  <p className="text-sm text-amber-700">{progressAnalysis.remainingFocus.observation}</p>
+                </div>
+              </div>
+
+              {/* Next Step */}
+              <div>
+                <h3 className="mb-2 text-sm font-semibold text-slate-900">Next Step</h3>
+                <div className="rounded-xl border border-emerald-100 bg-emerald-50 p-4">
+                  <p className="text-sm text-emerald-800">{progressAnalysis.nextStep}</p>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
 
         {/* CTA */}
         <div className="flex flex-col items-center gap-4 pt-4">
@@ -179,93 +427,6 @@ export default function FinalEvaluationPage() {
           </Link>
         </div>
       </main>
-    </div>
-  );
-}
-
-function AnswerComparison() {
-  const [improvements, setImprovements] = useState<string[]>([]);
-  const [status, setStatus] = useState<'idle' | 'loading' | 'done' | 'error'>('idle');
-
-  useEffect(() => {
-    const interviewTranscripts = getAllTranscripts();
-    const practiceTranscripts = getAllPracticeTranscripts();
-
-    if (interviewTranscripts.length === 0 || practiceTranscripts.length === 0) {
-      setStatus('done');
-      return;
-    }
-
-    let cancelled = false;
-    setStatus('loading');
-
-    fetch('/api/analyze-progress', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ interviewTranscripts, practiceTranscripts }),
-    })
-      .then((res) => res.json())
-      .then((data) => {
-        if (cancelled) return;
-        if (Array.isArray(data?.improvements)) {
-          setImprovements(data.improvements);
-          setStatus('done');
-        } else {
-          setStatus('error');
-        }
-      })
-      .catch((err) => {
-        console.error('Failed to analyze progress:', err);
-        if (!cancelled) setStatus('error');
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  if (status === 'idle' || status === 'loading') {
-    return (
-      <div className="mb-10 rounded-2xl border border-slate-200 bg-white p-8">
-        <h2 className="mb-6 flex items-center gap-2 text-lg font-semibold text-slate-900">
-          <svg className="h-5 w-5 text-[#DA291C]" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-            <path strokeLinecap="round" strokeLinejoin="round" d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6" />
-          </svg>
-          Your Progress
-        </h2>
-        <div className="space-y-3">
-          {[0, 1, 2].map((i) => (
-            <div key={i} className="h-4 animate-pulse rounded bg-slate-100" style={{ width: `${85 - i * 10}%` }} />
-          ))}
-        </div>
-        <p className="mt-4 text-xs text-slate-400">Analyzing your answers with AI…</p>
-      </div>
-    );
-  }
-
-  if (status === 'error' || improvements.length === 0) {
-    return null;
-  }
-
-  return (
-    <div className="mb-10 rounded-2xl border border-slate-200 bg-white p-8">
-      <h2 className="mb-6 flex items-center gap-2 text-lg font-semibold text-slate-900">
-        <svg className="h-5 w-5 text-[#DA291C]" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-          <path strokeLinecap="round" strokeLinejoin="round" d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6" />
-        </svg>
-        Your Progress
-      </h2>
-
-      <ol className="space-y-4">
-        {improvements.map((item, idx) => (
-          <li key={idx} className="flex gap-3">
-            <span className="flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-full bg-emerald-100 text-xs font-semibold text-emerald-700">
-              {idx + 1}
-            </span>
-            <p className="text-sm leading-relaxed text-slate-700">{item}</p>
-          </li>
-        ))}
-      </ol>
     </div>
   );
 }
