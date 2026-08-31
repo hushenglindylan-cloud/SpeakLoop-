@@ -115,8 +115,11 @@ async function fetchPracticeFeedback(params: {
   }
 }
 
-// Fetch TTS audio URL
-async function fetchTtsAudio(text: string, gender: 'male' | 'female'): Promise<string | null> {
+// Fetch TTS audio URL.
+// The gender is passed through exactly as the roster spells it ('Male' /
+// 'Female'): /api/tts looks it up in a case-sensitive voice map, so lower-
+// casing it here would make every request come back without audio.
+async function fetchTtsAudio(text: string, gender: string): Promise<string | null> {
   try {
     const res = await fetch('/api/tts', {
       method: 'POST',
@@ -138,7 +141,7 @@ export default function PracticePage() {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [examinerPortrait, setExaminerPortrait] = useState<string>('');
   const [examinerName, setExaminerName] = useState<string>('');
-  const [examinerGender, setExaminerGender] = useState<'male' | 'female'>('female');
+  const [examinerGender, setExaminerGender] = useState<string | null>(null);
   const [currentQ, setCurrentQ] = useState(0);
   const [isRecording, setIsRecording] = useState(false);
   const [isStopping, setIsStopping] = useState(false);
@@ -159,6 +162,10 @@ export default function PracticePage() {
   const questionAudioRef = useRef<HTMLAudioElement | null>(null);
   const ttsCacheRef = useRef<Map<string, string>>(new Map());
   const ttsLoadingRef = useRef<Set<string>>(new Set());
+  // Which question the examiner is currently speaking. Bumped when a new
+  // question starts and when the student takes the turn, so audio that
+  // finishes synthesising after either is dropped instead of played.
+  const speechSeqRef = useRef(0);
 
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
@@ -196,7 +203,8 @@ export default function PracticePage() {
       if (examiner) {
         setExaminerPortrait(getExaminerPortrait(examiner.id));
         setExaminerName(examiner.name);
-        setExaminerGender(examiner.gender === 'Male' ? 'male' : 'female');
+        // Verbatim — see fetchTtsAudio.
+        setExaminerGender(examiner.gender);
       }
 
       try {
@@ -234,11 +242,9 @@ export default function PracticePage() {
 
         setQuestions(data.questions);
         setPhase('intro');
-
-        // Preload TTS for the first question
-        if (data.questions.length > 0) {
-          preloadTts(data.questions[0].question, 0, 'main');
-        }
+        // The first question's audio is preloaded by the `phase === 'intro'`
+        // effect below. Calling preloadTts here would run against the
+        // mount-time closure, where the examiner's gender is still unknown.
       } catch (err) {
         console.error('Failed to load practice questions:', err);
         setLoadError('Failed to connect to the server. Please try again.');
@@ -250,6 +256,7 @@ export default function PracticePage() {
 
   // Preload TTS for a question
   const preloadTts = useCallback(async (text: string, questionIndex: number, type: 'main' | 'followup') => {
+    if (!examinerGender) return;
     const cacheKey = `${questionIndex}-${type}`;
     if (ttsCacheRef.current.has(cacheKey) || ttsLoadingRef.current.has(cacheKey)) {
       return;
@@ -267,8 +274,23 @@ export default function PracticePage() {
     }
   }, [examinerGender]);
 
-  // Play TTS audio for a question
-  const speakQuestion = useCallback(async (text: string, questionIndex: number, type: 'main' | 'followup') => {
+  // Speak a question aloud. Any failure — synthesis error, no voice for this
+  // examiner, playback blocked by the browser — degrades to showing the text
+  // with the reading countdown, so the student is never left with nothing.
+  // `seq` is the speech generation this call belongs to: if the student skips
+  // ahead while the audio is still being synthesised, the counter has moved on
+  // and the finished audio is dropped rather than played over their answer.
+  const speakQuestion = useCallback(async (text: string, questionIndex: number, type: 'main' | 'followup', seq: number) => {
+    const fallbackToText = () => {
+      setSpeechStatus('unavailable');
+      setShowQuestionText(true);
+    };
+
+    if (!examinerGender) {
+      fallbackToText();
+      return;
+    }
+
     const cacheKey = `${questionIndex}-${type}`;
     let audioUrl: string | null | undefined = ttsCacheRef.current.get(cacheKey);
 
@@ -281,25 +303,30 @@ export default function PracticePage() {
       }
     }
 
-    if (audioUrl) {
-      setTtsAudioUrl(audioUrl);
-      setIsTtsPlaying(true);
-      setSpeechStatus('playing');
+    // The student moved on while this was being synthesised.
+    if (speechSeqRef.current !== seq) return;
 
-      // Use the hidden audio element
-      const audio = questionAudioRef.current;
-      if (audio) {
-        audio.src = audioUrl;
-        audio.play().catch(() => {
-          setIsTtsPlaying(false);
-          setSpeechStatus('unavailable');
-          setShowQuestionText(true);
-        });
-      }
-    } else {
-      setSpeechStatus('unavailable');
-      setShowQuestionText(true);
+    if (!audioUrl) {
+      fallbackToText();
+      return;
     }
+
+    setTtsAudioUrl(audioUrl);
+
+    // Use the hidden audio element
+    const audio = questionAudioRef.current;
+    if (!audio) {
+      fallbackToText();
+      return;
+    }
+
+    setIsTtsPlaying(true);
+    setSpeechStatus('playing');
+    audio.src = audioUrl;
+    audio.play().catch(() => {
+      setIsTtsPlaying(false);
+      fallbackToText();
+    });
   }, [examinerGender]);
 
   // Recording timer
@@ -374,6 +401,20 @@ export default function PracticePage() {
     });
   }, []);
 
+  // Hand the turn to the student: open the microphone and move into the
+  // matching recording phase. Bumping the speech counter cancels a question
+  // still being synthesised so it cannot start talking mid-answer.
+  const beginAnswering = useCallback(() => {
+    speechSeqRef.current += 1;
+    if (phase === 'question') {
+      startRecording();
+      setPhase('recording');
+    } else if (phase === 'followup') {
+      startRecording();
+      setPhase('followup-recording');
+    }
+  }, [phase, startRecording]);
+
   // Reading countdown (only used when TTS is unavailable)
   useEffect(() => {
     if (phase !== 'question' && phase !== 'followup') return;
@@ -383,42 +424,37 @@ export default function PracticePage() {
     return () => clearTimeout(timer);
   }, [phase, readCountdown, speechStatus]);
 
-  // Start recording when countdown finishes (only when TTS unavailable)
+  // Start recording when countdown finishes (only when TTS unavailable —
+  // when the examiner can be heard, the audio ending is what opens the mic)
   useEffect(() => {
     if (readCountdown !== 0) return;
-    if (speechStatus !== 'unavailable') return; // Only start recording after countdown when TTS unavailable
-    if (phase === 'question') {
-      startRecording();
-      setPhase('recording');
-    } else if (phase === 'followup') {
-      startRecording();
-      setPhase('followup-recording');
-    }
-  }, [readCountdown, phase, startRecording, speechStatus]);
+    if (speechStatus !== 'unavailable') return;
+    beginAnswering();
+  }, [readCountdown, speechStatus, beginAnswering]);
 
   // Play TTS when entering question phase
   useEffect(() => {
     if ((phase === 'question' || phase === 'followup') && question) {
       setShowQuestionText(false);
       setSpeechStatus('loading');
+      // Drop the previous question's audio: until this one has been
+      // synthesised there is nothing to replay, and "Play again" must never
+      // offer the student the question before it.
+      setTtsAudioUrl(null);
       setReadCountdown(READING_SECONDS);
       const text = phase === 'question' ? question.question : question.followUp;
       const type = phase === 'question' ? 'main' : 'followup';
-      speakQuestion(text, currentQ, type);
+      speakQuestion(text, currentQ, type, ++speechSeqRef.current);
     }
   }, [phase, question, currentQ, speakQuestion]);
 
-  // Handle TTS audio ended - start recording
+  // The examiner finished speaking — the student's turn starts now. Guarded
+  // by beginAnswering's phase check, so replaying the question while already
+  // recording cannot restart the recorder.
   const handleQuestionAudioEnded = useCallback(() => {
     setIsTtsPlaying(false);
-    if (phase === 'question') {
-      startRecording();
-      setPhase('recording');
-    } else if (phase === 'followup') {
-      startRecording();
-      setPhase('followup-recording');
-    }
-  }, [phase, startRecording]);
+    beginAnswering();
+  }, [beginAnswering]);
 
   // Preload next question's TTS when entering a new question
   useEffect(() => {
@@ -447,6 +483,22 @@ export default function PracticePage() {
   }, [phase, isFollowUp, question, currentQ, questions, preloadTts]);
 
   const handleStartPractice = async () => {
+    // Browsers only allow programmatic audio playback once the page has had a
+    // real user gesture, and Safari wants the element itself started inside
+    // that gesture. Prime it here — synchronously, before the await below,
+    // which would otherwise spend the gesture — so every later question plays
+    // without another tap. Same approach as the interview page.
+    const audio = questionAudioRef.current;
+    if (audio) {
+      audio.muted = true;
+      audio.play().catch(() => {
+        // Priming failed; speakQuestion still falls back to the text.
+      });
+      audio.pause();
+      audio.currentTime = 0;
+      audio.muted = false;
+    }
+
     try {
       await navigator.mediaDevices.getUserMedia({ audio: true }).then((stream) => {
         stream.getTracks().forEach((track) => track.stop());
@@ -567,8 +619,17 @@ export default function PracticePage() {
     }
   };
 
+  // "Start Answering Now" — cut the examiner off and take the turn. Stopping
+  // the audio matters: left playing, the examiner's voice would carry on into
+  // the microphone and end up in the transcript.
   const handleStartAnswering = () => {
-    setReadCountdown(0);
+    const audio = questionAudioRef.current;
+    if (audio) {
+      audio.pause();
+      audio.currentTime = 0;
+    }
+    setIsTtsPlaying(false);
+    beginAnswering();
   };
 
   // Go to final evaluation

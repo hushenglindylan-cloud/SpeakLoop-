@@ -49,9 +49,20 @@ const VOICE_MAP: Record<string, string | undefined> = {
   Female: process.env.NEXT_PUBLIC_TTS_VOICE_FEMALE || 'Jennifer',
 };
 
-/** The voice id for an examiner, or undefined if that gender has no voice. */
+/**
+ * The voice id for an examiner, or undefined if that gender has no voice.
+ *
+ * The lookup is case-insensitive on purpose. The keys above are spelled the
+ * way the roster spells them ('Male' / 'Female'), and a caller that passed a
+ * normalised 'female' used to get no voice at all — which reaches the student
+ * as an examiner who silently stops speaking, the hardest failure to diagnose
+ * from the outside.
+ */
 export function voiceForExaminer(gender: string): string | undefined {
-  return VOICE_MAP[gender] || undefined;
+  const normalized = gender.trim().toLowerCase();
+  if (normalized === 'male') return VOICE_MAP.Male;
+  if (normalized === 'female') return VOICE_MAP.Female;
+  return undefined;
 }
 
 /** Whether this examiner can be offered to a student. */
