@@ -14,10 +14,25 @@
  * filters through `isExaminerSupported()`. Restoring an accent is therefore a
  * one-line change here — no examiner data has to be recreated.
  *
- * ⚠️ FILL IN THE VOICE IDS BELOW from the Model Studio voice list
- * (Qwen-TTS 音色列表). They are deliberately blank rather than guessed: a
- * plausible-but-wrong id fails at request time and is harder to spot than an
- * obviously missing one.
+ * ⚠️ FILL IN THE VOICE IDS BELOW from the Model Studio voice list. They are
+ * deliberately blank rather than guessed: a plausible-but-wrong id fails at
+ * request time and is harder to spot than an obviously missing one.
+ *
+ * ⚠️ VOICES ARE NOT PORTABLE BETWEEN MODEL FAMILIES. Model Studio rejects a
+ * voice that belongs to a different family with InvalidParameter, and the two
+ * families are also served from different endpoints with different request
+ * shapes. Whatever goes in the map below must belong to the family that
+ * `synthesizeSpeech()` in lib/ai/provider.ts actually calls (currently
+ * Qwen-TTS / qwen3-tts-flash).
+ *
+ * Confirmed English voices in the OTHER family, Qwen-Audio-TTS
+ * (`qwen-audio-3.0-tts-flash`) — usable only if the provider is switched to
+ * that family's endpoint, which is Beijing-only and needs a WorkspaceId:
+ *   loongmary      — British English, female  ("温暖英音")
+ *   loongeva_v3.6  — American English, female ("高智美音")
+ *   loongjohn      — American English, male   ("沉稳亲切美音")
+ * That family therefore covers British female and American male/female, but
+ * has no British male, Australian or Indian English voice.
  *
  * This module is imported by client components, so it must not depend on
  * server-only configuration — the overrides use the NEXT_PUBLIC_ prefix, which
