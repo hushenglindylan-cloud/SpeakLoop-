@@ -5,9 +5,9 @@ import { voiceForExaminer } from '@/lib/tts-voices';
 /**
  * POST /api/tts
  *
- * Speaks an examiner question. The caller passes the examiner's nationality
- * and gender rather than a voice id, so the voice mapping stays server-side
- * and there is exactly one place that decides which voice an examiner uses.
+ * Speaks an examiner question. The caller passes the examiner's gender rather
+ * than a voice id, so there is exactly one place that decides how an examiner
+ * sounds.
  *
  * Answers with { audioUrl } on success, or { error, stage } on failure — never
  * a silent partial success, because the interview page needs to know it should
@@ -20,9 +20,8 @@ import { voiceForExaminer } from '@/lib/tts-voices';
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
-    const { text, nationality, gender } = body as {
+    const { text, gender } = body as {
       text?: string;
-      nationality?: string;
       gender?: string;
     };
 
@@ -30,20 +29,17 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'No text provided', stage: 'no-text' });
     }
 
-    if (!nationality || !gender) {
+    if (!gender) {
       return NextResponse.json({
-        error: 'Examiner nationality and gender are required to pick a voice.',
+        error: 'Examiner gender is required to pick a voice.',
         stage: 'no-examiner',
       });
     }
 
-    const voice = voiceForExaminer(nationality, gender);
+    const voice = voiceForExaminer(gender);
     if (!voice) {
-      // No voice is configured for this accent/gender. Saying so plainly beats
-      // silently substituting a mismatched accent — an IELTS candidate hearing
-      // an American voice from a British examiner is a product defect.
       return NextResponse.json({
-        error: `No voice is configured for a ${nationality} ${gender} examiner.`,
+        error: `No voice is configured for a ${gender} examiner.`,
         stage: 'no-voice-for-examiner',
       });
     }

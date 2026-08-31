@@ -135,7 +135,7 @@ export default function InterviewPage() {
   // because a student who can neither hear nor read the question is stuck.
   const [speechStatus, setSpeechStatus] = useState<'idle' | 'loading' | 'playing' | 'unavailable'>('idle');
   const [showQuestionText, setShowQuestionText] = useState(false);
-  const [examinerVoiceContext, setExaminerVoiceContext] = useState<{ nationality: string; gender: string } | null>(null);
+  const [examinerGender, setExaminerGender] = useState<string | null>(null);
   const questionAudioRef = useRef<HTMLAudioElement | null>(null);
   // Which recording phase to enter once the examiner finishes speaking.
   const nextRecordingPhaseRef = useRef<'recording' | 'followup-recording'>('recording');
@@ -167,8 +167,8 @@ export default function InterviewPage() {
       if (examiner) {
         setExaminerPortrait(getExaminerPortrait(examiner.id));
         setExaminerName(examiner.name);
-        // The voice is chosen server-side from these two attributes.
-        setExaminerVoiceContext({ nationality: examiner.nationality, gender: examiner.gender });
+        // The voice is chosen server-side from the examiner's gender.
+        setExaminerGender(examiner.gender);
       }
       const excludeIds: string[] = [];
 
@@ -294,7 +294,7 @@ export default function InterviewPage() {
         setReadCountdown(READING_SECONDS);
       };
 
-      if (!examinerVoiceContext) {
+      if (!examinerGender) {
         fallbackToText();
         return;
       }
@@ -304,11 +304,7 @@ export default function InterviewPage() {
         const res = await fetch('/api/tts', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            text,
-            nationality: examinerVoiceContext.nationality,
-            gender: examinerVoiceContext.gender,
-          }),
+          body: JSON.stringify({ text, gender: examinerGender }),
         });
         const data = await res.json();
 
@@ -335,7 +331,7 @@ export default function InterviewPage() {
         fallbackToText();
       }
     },
-    [examinerVoiceContext]
+    [examinerGender]
   );
 
   const playQuestionAndRecord = useCallback(() => {
