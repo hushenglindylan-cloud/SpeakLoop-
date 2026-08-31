@@ -163,10 +163,24 @@ export async function transcribeWithXfyunAst(pcm: Buffer): Promise<AstResult> {
     let sessionId: string = uuid;
     let ws: WebSocket;
 
+    // Tracked so a bare close (code 1006 carries no reason) can still say
+    // *where* it died: a handshake the server rejected at the HTTP level
+    // never opens the socket at all, which looks identical to a mid-stream
+    // drop unless these are reported.
+    let opened = false;
+    let startedSeen = false;
+    let framesReceived = 0;
+    let bytesSent = 0;
+    let streamingDone = false;
+
+    const trace = () =>
+      `opened=${opened} started=${startedSeen} framesIn=${framesReceived} bytesSent=${bytesSent}/${pcm.length} streamDone=${streamingDone}`;
+
     const finish = (result: AstResult) => {
       if (settled) return;
       settled = true;
       clearTimeout(overallTimer);
+      clearTimeout(handshakeTimer);
       try {
         ws?.close();
       } catch {
@@ -176,9 +190,47 @@ export async function transcribeWithXfyunAst(pcm: Buffer): Promise<AstResult> {
     };
 
     const overallTimer = setTimeout(() => {
-      console.error('xfyun ast overall timeout; text so far:', finalText.length, 'chars');
-      finish({ error: 'Transcription took too long. Please try again.', stage: 'ast-timeout' });
+      console.error('xfyun ast overall timeout;', trace());
+      finish({ error: 'Transcription took too long. Please try again.', stage: 'ast-timeout', detail: trace() });
     }, OVERALL_TIMEOUT_MS);
+
+    // The docs describe an `action: "started"` handshake ack, and audio only
+    // being sent once the real-time phase has begun. If it never arrives the
+    // connection is not usable, so fail with the trace rather than streaming
+    // an entire answer into a socket the server has already given up on.
+    const handshakeTimer = setTimeout(() => {
+      if (!startedSeen && !settled) {
+        console.error('xfyun ast: no started frame within 10s;', trace());
+        finish({
+          error: "We couldn't start the transcription session.",
+          stage: 'ast-no-handshake',
+          detail: trace(),
+        });
+      }
+    }, 10_000);
+
+    const streamAudio = async () => {
+      try {
+        for (let offset = 0; offset < pcm.length; offset += CHUNK_BYTES) {
+          if (settled || ws.readyState !== ws.OPEN) return;
+          const chunk = pcm.subarray(offset, Math.min(offset + CHUNK_BYTES, pcm.length));
+          ws.send(new Uint8Array(chunk));
+          bytesSent += chunk.length;
+          await new Promise((r) => setTimeout(r, CHUNK_INTERVAL_MS));
+        }
+        if (!settled && ws.readyState === ws.OPEN) {
+          ws.send(JSON.stringify({ end: true, sessionId }));
+          streamingDone = true;
+        }
+      } catch (err) {
+        console.error('xfyun ast send error:', err);
+        finish({
+          error: 'Uploading your answer failed.',
+          stage: 'ast-send-error',
+          detail: `${err instanceof Error ? err.message : String(err)} (${trace()})`,
+        });
+      }
+    };
 
     try {
       ws = new WebSocket(`${AST_HOST}?${query}`);
@@ -193,29 +245,15 @@ export async function transcribeWithXfyunAst(pcm: Buffer): Promise<AstResult> {
 
     ws.binaryType = 'arraybuffer';
 
-    ws.onopen = async () => {
-      try {
-        for (let offset = 0; offset < pcm.length; offset += CHUNK_BYTES) {
-          if (settled || ws.readyState !== ws.OPEN) return;
-          ws.send(new Uint8Array(pcm.subarray(offset, Math.min(offset + CHUNK_BYTES, pcm.length))));
-          await new Promise((r) => setTimeout(r, CHUNK_INTERVAL_MS));
-        }
-        if (!settled && ws.readyState === ws.OPEN) {
-          ws.send(JSON.stringify({ end: true, sessionId }));
-        }
-      } catch (err) {
-        console.error('xfyun ast send error:', err);
-        finish({
-          error: 'Uploading your answer failed.',
-          stage: 'ast-send-error',
-          detail: err instanceof Error ? err.message : String(err),
-        });
-      }
+    ws.onopen = () => {
+      opened = true;
+      // Audio is not sent here — it waits for the `started` ack below.
     };
 
     ws.onmessage = (event) => {
       const raw = typeof event.data === 'string' ? event.data : '';
       if (!raw) return;
+      framesReceived++;
       let frame: AstFrame;
       try {
         frame = JSON.parse(raw);
@@ -239,6 +277,14 @@ export async function transcribeWithXfyunAst(pcm: Buffer): Promise<AstResult> {
           detail: frame.desc || dataObj.desc || frame.code,
           raw: raw.slice(0, 500),
         });
+        return;
+      }
+
+      // Handshake ack — the real-time phase has begun, so start streaming.
+      if (frame.action === 'started' && !startedSeen) {
+        startedSeen = true;
+        clearTimeout(handshakeTimer);
+        void streamAudio();
         return;
       }
 
@@ -269,11 +315,16 @@ export async function transcribeWithXfyunAst(pcm: Buffer): Promise<AstResult> {
         finish({ transcript });
         return;
       }
-      console.error('xfyun ast closed with no transcript. code:', event.code, 'reason:', event.reason);
+      console.error('xfyun ast closed with no transcript. code:', event.code, 'reason:', event.reason, trace());
+      // Code 1006 carries no reason, so the trace is the only evidence of
+      // where it failed: opened=false means the server rejected the
+      // handshake outright (bad signature/params/permissions), while
+      // opened=true with started=false means it accepted the socket then
+      // dropped it without acknowledging.
       finish({
         error: "We couldn't detect your voice. Please try again.",
         stage: 'ast-no-transcript',
-        detail: `close ${event.code}${event.reason ? `: ${event.reason}` : ''}`,
+        detail: `close ${event.code}${event.reason ? `: ${event.reason}` : ''} (${trace()})`,
       });
     };
   });
