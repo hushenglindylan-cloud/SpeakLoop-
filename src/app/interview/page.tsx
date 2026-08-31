@@ -31,12 +31,10 @@ const fallbackFollowUps = [
   'How do you think this might change in the future?',
 ];
 
-// Simulate question audio playback (no actual audio, just a delay)
-function simulateQuestionAudio(onEnded: () => void) {
-  setTimeout(() => {
-    onEnded();
-  }, 3000);
-}
+// Seconds the question stays on screen before recording starts. There is no
+// TTS yet (PRD §9), so the examiner asks in text and this is the student's
+// window to read it — not a stand-in for audio playback. They can skip it.
+const READING_SECONDS = 6;
 
 // Pick the best audio format the current browser actually supports for
 // MediaRecorder. Safari does not support webm at all (only mp4/aac), so we
@@ -120,7 +118,7 @@ export default function InterviewPage() {
   const isProcessingAnswerRef = useRef(false);
   const [isProcessingAnswer, setIsProcessingAnswer] = useState(false);
   const [isFinalizing, setIsFinalizing] = useState(false);
-  const [showQuestion, setShowQuestion] = useState(false);
+  const [readCountdown, setReadCountdown] = useState(READING_SECONDS);
   const [elapsed, setElapsed] = useState(0);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
@@ -130,8 +128,17 @@ export default function InterviewPage() {
   const pendingTranscriptionsRef = useRef<Promise<void>[]>([]);
   const [followUpText, setFollowUpText] = useState<string>('');
 
-  // Fetch questions from RAG + LLM on mount
+  // Fetch questions from RAG + LLM on mount. Single-flight: without the guard
+  // this runs twice under dev StrictMode, which burns a second LLM selection,
+  // lets the later response replace the questions already on screen, and
+  // records both sets in usedQuestionIds — so Practice would then skip
+  // questions the student was never actually asked.
+  const hasLoadedQuestionsRef = useRef(false);
+
   useEffect(() => {
+    if (hasLoadedQuestionsRef.current) return;
+    hasLoadedQuestionsRef.current = true;
+
     async function loadQuestions() {
       const session = getSession();
       if (!session) {
@@ -253,31 +260,41 @@ export default function InterviewPage() {
     });
   }, []);
 
-  // Play question audio and start recording after it ends
+  // Show the question and give the student a moment to read it before the
+  // microphone opens.
   const playQuestionAndRecord = useCallback(() => {
     isProcessingAnswerRef.current = false;
     setIsProcessingAnswer(false);
+    setReadCountdown(READING_SECONDS);
     setPhase('question');
-    simulateQuestionAudio(() => {
-      setTimeout(() => {
-        startRecording();
-        setPhase('recording');
-      }, 500);
-    });
-  }, [startRecording]);
+  }, []);
 
-  // Play follow-up audio and start recording after it ends
   const playFollowUpAndRecord = useCallback(() => {
     isProcessingAnswerRef.current = false;
     setIsProcessingAnswer(false);
+    setReadCountdown(READING_SECONDS);
     setPhase('followup');
-    simulateQuestionAudio(() => {
-      setTimeout(() => {
-        startRecording();
-        setPhase('followup-recording');
-      }, 500);
-    });
-  }, [startRecording]);
+  }, []);
+
+  // Tick the reading countdown down while a question is on screen.
+  useEffect(() => {
+    if (phase !== 'question' && phase !== 'followup') return;
+    if (readCountdown <= 0) return;
+    const timer = setTimeout(() => setReadCountdown((c) => c - 1), 1000);
+    return () => clearTimeout(timer);
+  }, [phase, readCountdown]);
+
+  // Countdown finished (or was skipped) — open the microphone.
+  useEffect(() => {
+    if (readCountdown !== 0) return;
+    if (phase === 'question') {
+      startRecording();
+      setPhase('recording');
+    } else if (phase === 'followup') {
+      startRecording();
+      setPhase('followup-recording');
+    }
+  }, [readCountdown, phase, startRecording]);
 
   // Stop recording and move on — for main answers, we wait for transcription
   // then call /api/follow-up to generate a contextual follow-up question.
@@ -290,7 +307,6 @@ export default function InterviewPage() {
     setIsProcessingAnswer(true);
     setIsStopping(true);
     setIsRecording(false);
-    setShowQuestion(false);
 
     // Releases the re-entry lock. Called on every exit path below, including
     // unexpected errors, so a failure never leaves the button permanently
@@ -394,8 +410,9 @@ export default function InterviewPage() {
     stopRecordingAndSave(true);
   };
 
-  const handleViewQuestion = () => {
-    setShowQuestion(true);
+  // Skip the remaining reading time and start answering now.
+  const handleStartAnswering = () => {
+    setReadCountdown(0);
   };
 
   // The only point in the flow where we wait on background transcription —
@@ -463,8 +480,11 @@ export default function InterviewPage() {
                 <span className="text-sm text-slate-500">Recording in progress...</span>
               </>
             )}
-            {!isRecording && phase !== 'finished' && phase !== 'examiner-intro' && (
-              <span className="text-sm text-slate-400">Waiting...</span>
+            {!isRecording && (phase === 'question' || phase === 'followup') && (
+              <span className="text-sm text-slate-400">Read the question…</span>
+            )}
+            {!isRecording && isProcessingAnswer && (
+              <span className="text-sm text-slate-400">Processing your answer…</span>
             )}
           </div>
           {isRecording && (
@@ -491,17 +511,22 @@ export default function InterviewPage() {
             </div>
           )}
 
-          {/* Question Phase Overlay — subtle, portrait still visible */}
+          {/* Question phase — the question itself is the delivery mechanism,
+              since there is no examiner audio to listen to. */}
           {(phase === 'question' || phase === 'followup') && (
-            <div className="absolute inset-0 bg-black/20 flex items-center justify-center pointer-events-none">
-              <div className="text-center">
-                <div className="w-14 h-14 rounded-full bg-white/15 backdrop-blur-sm flex items-center justify-center mx-auto mb-3">
-                  <svg className="w-7 h-7 text-white animate-pulse" fill="currentColor" viewBox="0 0 24 24">
-                    <path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3z"/>
-                    <path d="M17 11c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92V21h2v-3.08c3.39-.49 6-3.39 6-6.92h-2z"/>
-                  </svg>
-                </div>
-                <p className="text-white/90 text-base font-medium drop-shadow">Examiner is speaking...</p>
+            <div className="absolute inset-0 bg-black/50 flex items-center justify-center p-6">
+              <div className="max-w-2xl text-center">
+                <p className="text-white/60 text-xs uppercase tracking-wide mb-3">
+                  {phase === 'question' ? `Question ${currentQ + 1}` : 'Follow-up'}
+                </p>
+                <p className="text-white text-lg sm:text-xl font-medium leading-relaxed drop-shadow">
+                  {phase === 'question'
+                    ? questions[currentQ]?.question
+                    : followUpText || fallbackFollowUps[currentQ % fallbackFollowUps.length]}
+                </p>
+                <p className="text-white/70 text-sm mt-5">
+                  Recording starts in {readCountdown}s
+                </p>
               </div>
             </div>
           )}
@@ -522,30 +547,21 @@ export default function InterviewPage() {
           )}
         </div>
 
-        {/* Question text toggle — lives in the scrollable area, not the sticky bar */}
+        {/* The question stays on screen while answering — with no audio there
+            is nothing to "not catch", so hiding it behind a toggle only made
+            the student work to see what they were answering. */}
         {(phase === 'recording' || phase === 'followup-recording') && (
           <div className="mt-4">
-            {!showQuestion ? (
-              <div className="bg-slate-50 rounded-xl p-4 text-center">
-                <p className="text-slate-500 text-sm">
-                  Didn&apos;t catch that?{' '}
-                  <button onClick={handleViewQuestion} className="text-[#DA291C] font-medium hover:underline">
-                    View question text
-                  </button>
-                </p>
-              </div>
-            ) : (
-              <div className="bg-slate-50 rounded-xl p-4">
-                <p className="text-xs text-slate-400 uppercase tracking-wide mb-2">
-                  {phase === 'recording' ? 'Question' : 'Follow-up'}
-                </p>
-                <p className="text-slate-700 text-base leading-relaxed">
-                  {phase === 'recording'
-                    ? questions[currentQ]?.question
-                    : followUpText || fallbackFollowUps[currentQ % fallbackFollowUps.length]}
-                </p>
-              </div>
-            )}
+            <div className="bg-slate-50 rounded-xl p-4">
+              <p className="text-xs text-slate-400 uppercase tracking-wide mb-2">
+                {phase === 'recording' ? 'Question' : 'Follow-up'}
+              </p>
+              <p className="text-slate-700 text-base leading-relaxed">
+                {phase === 'recording'
+                  ? questions[currentQ]?.question
+                  : followUpText || fallbackFollowUps[currentQ % fallbackFollowUps.length]}
+              </p>
+            </div>
           </div>
         )}
 
@@ -580,6 +596,15 @@ export default function InterviewPage() {
               className="w-full py-3 bg-[#DA291C] text-white rounded-lg font-medium hover:bg-[#B91C1C] transition-colors"
             >
               I&apos;m Ready — Start Questions
+            </button>
+          )}
+
+          {(phase === 'question' || phase === 'followup') && (
+            <button
+              onClick={handleStartAnswering}
+              className="w-full py-3.5 bg-[#DA291C] text-white rounded-xl font-medium hover:bg-[#B91C1C] transition-colors"
+            >
+              Start Answering Now
             </button>
           )}
 

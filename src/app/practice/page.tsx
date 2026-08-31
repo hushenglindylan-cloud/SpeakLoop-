@@ -23,6 +23,11 @@ interface PracticeQuestion {
 
 type Phase = 'loading' | 'intro' | 'question' | 'recording' | 'followup' | 'followup-recording' | 'finished';
 
+// Seconds the question stays on screen before recording starts. There is no
+// TTS yet (PRD §9), so the examiner asks in text and this is the student's
+// window to read it — not a stand-in for audio playback. They can skip it.
+const READING_SECONDS = 6;
+
 // Pick the best audio format the current browser actually supports for
 // MediaRecorder. Safari does not support webm at all (only mp4/aac), so we
 // must detect this rather than hardcoding one format for every browser.
@@ -97,7 +102,7 @@ export default function PracticePage() {
   const [isRecording, setIsRecording] = useState(false);
   const [isStopping, setIsStopping] = useState(false);
   const [isFinalizing, setIsFinalizing] = useState(false);
-  const [showQuestion, setShowQuestion] = useState(false);
+  const [readCountdown, setReadCountdown] = useState(READING_SECONDS);
   const [elapsed, setElapsed] = useState(0);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
@@ -108,8 +113,14 @@ export default function PracticePage() {
 
   const question = questions[currentQ];
 
-  // Fetch targeted practice questions based on evaluation results
+  // Fetch targeted practice questions based on evaluation results.
+  // Single-flight for the same reason as the interview page's loader.
+  const hasLoadedQuestionsRef = useRef(false);
+
   useEffect(() => {
+    if (hasLoadedQuestionsRef.current) return;
+    hasLoadedQuestionsRef.current = true;
+
     async function loadPracticeQuestions() {
       const session = getSession();
       if (!session) {
@@ -238,17 +249,34 @@ export default function PracticePage() {
     });
   }, []);
 
+  // Tick the reading countdown down while a question is on screen.
+  useEffect(() => {
+    if (phase !== 'question' && phase !== 'followup') return;
+    if (readCountdown <= 0) return;
+    const timer = setTimeout(() => setReadCountdown((c) => c - 1), 1000);
+    return () => clearTimeout(timer);
+  }, [phase, readCountdown]);
+
+  // Countdown finished (or was skipped) — open the microphone.
+  useEffect(() => {
+    if (readCountdown !== 0) return;
+    if (phase === 'question') {
+      startRecording();
+      setPhase('recording');
+    } else if (phase === 'followup') {
+      startRecording();
+      setPhase('followup-recording');
+    }
+  }, [readCountdown, phase, startRecording]);
+
   const handleStartPractice = async () => {
     // Request microphone permission up front (kept alive for the whole session)
     try {
       await navigator.mediaDevices.getUserMedia({ audio: true }).then((stream) => {
         stream.getTracks().forEach((track) => track.stop());
       });
+      setReadCountdown(READING_SECONDS);
       setPhase('question');
-      setTimeout(() => {
-        setPhase('recording');
-        startRecording();
-      }, 3000);
     } catch {
       alert('Microphone access is required for practice. Please allow microphone access and try again.');
     }
@@ -263,7 +291,6 @@ export default function PracticePage() {
     if (isStopping || questions.length === 0) return;
     setIsStopping(true);
     setIsRecording(false);
-    setShowQuestion(false);
 
     const audioBlob = await stopAndCollectAudio();
     setElapsed(0);
@@ -285,28 +312,23 @@ export default function PracticePage() {
     if (isFollowUp) {
       if (currentQ < questions.length - 1) {
         setCurrentQ((prev) => prev + 1);
+        setReadCountdown(READING_SECONDS);
         setPhase('question');
-        setTimeout(() => {
-          setPhase('recording');
-          startRecording();
-        }, 3000);
       } else {
         setPhase('finished');
       }
     } else {
+      setReadCountdown(READING_SECONDS);
       setPhase('followup');
-      setTimeout(() => {
-        setPhase('followup-recording');
-        startRecording();
-      }, 3000);
     }
-  }, [currentQ, isStopping, questions, startRecording, stopAndCollectAudio]);
+  }, [currentQ, isStopping, questions, stopAndCollectAudio]);
 
   const handleFinishMainAnswer = () => finishAnswer(false);
   const handleFinishFollowUp = () => finishAnswer(true);
 
-  const handleViewQuestion = () => {
-    setShowQuestion(true);
+  // Skip the remaining reading time and start answering now.
+  const handleStartAnswering = () => {
+    setReadCountdown(0);
   };
 
   // The only point in the flow where we wait on background transcription —
@@ -448,7 +470,7 @@ export default function PracticePage() {
                   </>
                 )}
                 {!isRecording && (phase === 'question' || phase === 'followup') && (
-                  <span className="text-sm text-slate-400">Examiner is speaking...</span>
+                  <span className="text-sm text-slate-400">Read the question…</span>
                 )}
               </div>
               {isRecording && (
@@ -480,24 +502,29 @@ export default function PracticePage() {
                 <span className="text-xs font-medium text-amber-400">PRACTICE</span>
               </div>
 
-              {/* Question Phase Overlay */}
+              {/* Question phase — the question itself is the delivery
+                  mechanism, since there is no examiner audio to listen to. */}
               {(phase === 'question' || phase === 'followup') && (
-                <div className="absolute inset-0 bg-black/40 flex items-center justify-center">
-                  <div className="text-center">
-                    <div className="w-16 h-16 rounded-full bg-white/20 flex items-center justify-center mx-auto mb-4">
-                      <svg className="w-8 h-8 text-white animate-pulse" fill="currentColor" viewBox="0 0 24 24">
-                        <path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3z"/>
-                        <path d="M17 11c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92V21h2v-3.08c3.39-.49 6-3.39 6-6.92h-2z"/>
-                      </svg>
-                    </div>
-                    <p className="text-white text-lg font-medium">Examiner is speaking...</p>
+                <div className="absolute inset-0 bg-black/50 flex items-center justify-center p-6">
+                  <div className="max-w-2xl text-center">
+                    <p className="text-white/60 text-xs uppercase tracking-wide mb-3">
+                      {phase === 'question' ? `Question ${currentQ + 1}` : 'Follow-up'}
+                    </p>
+                    <p className="text-white text-lg sm:text-xl font-medium leading-relaxed drop-shadow">
+                      {phase === 'question' ? question.question : question.followUp}
+                    </p>
+                    <p className="text-white/70 text-sm mt-5">
+                      Recording starts in {readCountdown}s
+                    </p>
                   </div>
                 </div>
               )}
 
             </div>
 
-            {/* Focus hint + question text toggle — scrollable area, not the sticky bar */}
+            {/* The question stays on screen while answering — with no audio
+                there is nothing to "not catch", so hiding it behind a toggle
+                only made the student work to see what they were answering. */}
             {(phase === 'recording' || phase === 'followup-recording') && (
               <div className="mt-4 space-y-4">
                 {phase === 'recording' && (
@@ -508,27 +535,16 @@ export default function PracticePage() {
                   </div>
                 )}
 
-                {!showQuestion ? (
-                  <div className="bg-slate-50 rounded-xl p-4 text-center">
-                    <p className="text-slate-500 text-sm">
-                      Didn&apos;t catch that?{' '}
-                      <button onClick={handleViewQuestion} className="text-[#DA291C] font-medium hover:underline">
-                        View question text
-                      </button>
-                    </p>
-                  </div>
-                ) : (
-                  <div className="bg-slate-50 rounded-xl p-4">
-                    <p className="text-xs text-slate-400 uppercase tracking-wide mb-2">
-                      {phase === 'recording' ? 'Question' : 'Follow-up'}
-                    </p>
-                    <p className="text-slate-700 text-base leading-relaxed">
-                      {phase === 'recording'
-                        ? question.question
-                        : question.followUp}
-                    </p>
-                  </div>
-                )}
+                <div className="bg-slate-50 rounded-xl p-4">
+                  <p className="text-xs text-slate-400 uppercase tracking-wide mb-2">
+                    {phase === 'recording' ? 'Question' : 'Follow-up'}
+                  </p>
+                  <p className="text-slate-700 text-base leading-relaxed">
+                    {phase === 'recording'
+                      ? question.question
+                      : question.followUp}
+                  </p>
+                </div>
               </div>
             )}
 
@@ -555,16 +571,25 @@ export default function PracticePage() {
       </main>
 
       {/* Sticky action bar — mirrors the Interview page exactly */}
-      {(phase === 'recording' || phase === 'followup-recording') && (
+      {(phase === 'question' || phase === 'followup' || phase === 'recording' || phase === 'followup-recording') && (
         <div className="fixed bottom-0 inset-x-0 z-30 bg-white/95 backdrop-blur-sm border-t border-slate-100 shadow-[0_-4px_16px_rgba(0,0,0,0.06)]">
           <div className="max-w-4xl mx-auto px-6 py-4" style={{ paddingBottom: 'calc(1rem + env(safe-area-inset-bottom))' }}>
-            <button
-              onClick={phase === 'recording' ? handleFinishMainAnswer : handleFinishFollowUp}
-              disabled={isStopping}
-              className="w-full py-3.5 bg-slate-800 text-white rounded-xl font-medium hover:bg-slate-700 transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
-            >
-              Finish Answer
-            </button>
+            {phase === 'question' || phase === 'followup' ? (
+              <button
+                onClick={handleStartAnswering}
+                className="w-full py-3.5 bg-[#DA291C] text-white rounded-xl font-medium hover:bg-[#B91C1C] transition-colors"
+              >
+                Start Answering Now
+              </button>
+            ) : (
+              <button
+                onClick={phase === 'recording' ? handleFinishMainAnswer : handleFinishFollowUp}
+                disabled={isStopping}
+                className="w-full py-3.5 bg-slate-800 text-white rounded-xl font-medium hover:bg-slate-700 transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
+              >
+                Finish Answer
+              </button>
+            )}
           </div>
         </div>
       )}

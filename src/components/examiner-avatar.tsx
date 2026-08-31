@@ -12,7 +12,10 @@ interface ExaminerAvatarProps {
  * Overlays state indicators on top of the portrait.
  */
 export function ExaminerAvatar({ src, name, phase }: ExaminerAvatarProps) {
-  const isSpeaking = phase === 'question' || phase === 'followup';
+  // There is no TTS yet (PRD §9), so questions are delivered as text. Nothing
+  // here may suggest audio is playing — the examiner "asks" by putting the
+  // question on screen.
+  const isAsking = phase === 'question' || phase === 'followup';
   const isListening = phase === 'recording' || phase === 'followup-recording';
 
   return (
@@ -33,25 +36,10 @@ export function ExaminerAvatar({ src, name, phase }: ExaminerAvatarProps) {
         </div>
       )}
 
-      {/* Speaking overlay — subtle red vignette + audio wave indicator */}
-      {isSpeaking && (
-        <>
-          <div className="absolute inset-0 bg-gradient-to-t from-black/60 via-transparent to-transparent" />
-          {/* Audio wave animation at bottom */}
-          <div className="absolute bottom-16 left-1/2 -translate-x-1/2 flex items-end gap-1">
-            {[0, 1, 2, 3, 4].map((i) => (
-              <div
-                key={i}
-                className="w-1 bg-[#DA291C] rounded-full animate-pulse"
-                style={{
-                  height: `${12 + Math.sin(i * 1.2) * 8}px`,
-                  animationDelay: `${i * 0.15}s`,
-                  animationDuration: '0.8s',
-                }}
-              />
-            ))}
-          </div>
-        </>
+      {/* Asking overlay — darkens the portrait so the question text on top of
+          it stays readable. No audio-wave animation: nothing is being played. */}
+      {isAsking && (
+        <div className="absolute inset-0 bg-gradient-to-t from-black/60 via-transparent to-transparent" />
       )}
 
       {/* Listening overlay — subtle warm tint */}
@@ -64,14 +52,14 @@ export function ExaminerAvatar({ src, name, phase }: ExaminerAvatarProps) {
         <div className="flex items-center gap-3">
           {/* Status dot */}
           <div className={`w-2.5 h-2.5 rounded-full flex-shrink-0 ${
-            isSpeaking ? 'bg-[#DA291C] animate-pulse' :
+            isAsking ? 'bg-[#DA291C]' :
             isListening ? 'bg-red-500 animate-pulse' :
             'bg-emerald-400'
           }`} />
           <div className="min-w-0">
             <p className="text-white text-sm font-medium truncate">{name}</p>
             <p className="text-white/60 text-xs">
-              {isSpeaking ? 'Examiner is speaking...' :
+              {isAsking ? 'Asking a question' :
                isListening ? 'Listening to you...' :
                'Ready'}
             </p>
