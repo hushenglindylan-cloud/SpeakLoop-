@@ -17,7 +17,7 @@ interface PracticeQuestion {
   questionId: string;
   topic: string;
   question: string;
-  followUp: string;
+  difficulty: string;
   contextHint: string;
 }
 
@@ -33,10 +33,6 @@ type Phase =
   | 'question'
   | 'recording'
   | 'feedback'
-  | 'retry'
-  | 'followup'
-  | 'followup-recording'
-  | 'followup-feedback'
   | 'finished';
 
 type ProcessingStage = 'idle' | 'recording' | 'stt' | 'feedback';
@@ -151,7 +147,6 @@ export default function PracticePage() {
   const [processingStage, setProcessingStage] = useState<ProcessingStage>('idle');
   const [feedback, setFeedback] = useState<PracticeFeedback | null>(null);
   const [lastAnswer, setLastAnswer] = useState<string>('');
-  const [isFollowUp, setIsFollowUp] = useState(false);
 
   // TTS state
   const [ttsAudioUrl, setTtsAudioUrl] = useState<string | null>(null);
@@ -255,9 +250,9 @@ export default function PracticePage() {
   }, []);
 
   // Preload TTS for a question
-  const preloadTts = useCallback(async (text: string, questionIndex: number, type: 'main' | 'followup') => {
+  const preloadTts = useCallback(async (text: string, questionIndex: number) => {
     if (!examinerGender) return;
-    const cacheKey = `${questionIndex}-${type}`;
+    const cacheKey = String(questionIndex);
     if (ttsCacheRef.current.has(cacheKey) || ttsLoadingRef.current.has(cacheKey)) {
       return;
     }
@@ -280,7 +275,7 @@ export default function PracticePage() {
   // `seq` is the speech generation this call belongs to: if the student skips
   // ahead while the audio is still being synthesised, the counter has moved on
   // and the finished audio is dropped rather than played over their answer.
-  const speakQuestion = useCallback(async (text: string, questionIndex: number, type: 'main' | 'followup', seq: number) => {
+  const speakQuestion = useCallback(async (text: string, questionIndex: number, seq: number) => {
     const fallbackToText = () => {
       setSpeechStatus('unavailable');
       setShowQuestionText(true);
@@ -291,7 +286,7 @@ export default function PracticePage() {
       return;
     }
 
-    const cacheKey = `${questionIndex}-${type}`;
+    const cacheKey = String(questionIndex);
     let audioUrl: string | null | undefined = ttsCacheRef.current.get(cacheKey);
 
     if (!audioUrl) {
@@ -406,18 +401,14 @@ export default function PracticePage() {
   // still being synthesised so it cannot start talking mid-answer.
   const beginAnswering = useCallback(() => {
     speechSeqRef.current += 1;
-    if (phase === 'question') {
-      startRecording();
-      setPhase('recording');
-    } else if (phase === 'followup') {
-      startRecording();
-      setPhase('followup-recording');
-    }
+    if (phase !== 'question') return;
+    startRecording();
+    setPhase('recording');
   }, [phase, startRecording]);
 
   // Reading countdown (only used when TTS is unavailable)
   useEffect(() => {
-    if (phase !== 'question' && phase !== 'followup') return;
+    if (phase !== 'question') return;
     if (speechStatus !== 'unavailable') return; // Only countdown when TTS unavailable
     if (readCountdown <= 0) return;
     const timer = setTimeout(() => setReadCountdown((c) => c - 1), 1000);
@@ -434,7 +425,7 @@ export default function PracticePage() {
 
   // Play TTS when entering question phase
   useEffect(() => {
-    if ((phase === 'question' || phase === 'followup') && question) {
+    if (phase === 'question' && question) {
       setShowQuestionText(false);
       setSpeechStatus('loading');
       // Drop the previous question's audio: until this one has been
@@ -442,9 +433,7 @@ export default function PracticePage() {
       // offer the student the question before it.
       setTtsAudioUrl(null);
       setReadCountdown(READING_SECONDS);
-      const text = phase === 'question' ? question.question : question.followUp;
-      const type = phase === 'question' ? 'main' : 'followup';
-      speakQuestion(text, currentQ, type, ++speechSeqRef.current);
+      speakQuestion(question.question, currentQ, ++speechSeqRef.current);
     }
   }, [phase, question, currentQ, speakQuestion]);
 
@@ -456,31 +445,21 @@ export default function PracticePage() {
     beginAnswering();
   }, [beginAnswering]);
 
-  // Preload next question's TTS when entering a new question
+  // Preload the first question's audio while the student reads the intro
   useEffect(() => {
     if (phase === 'intro' && questions.length > 0) {
-      preloadTts(questions[0].question, 0, 'main');
+      preloadTts(questions[0].question, 0);
     }
   }, [phase, questions, preloadTts]);
 
-  // Preload follow-up TTS when recording main answer
+  // Preload the next question while the student answers this one, so the
+  // examiner can speak the moment they move on
   useEffect(() => {
-    if (phase === 'recording' && question) {
-      preloadTts(question.followUp, currentQ, 'followup');
-    }
-  }, [phase, question, currentQ, preloadTts]);
-
-  // Preload next question's TTS when showing feedback
-  useEffect(() => {
-    if (phase === 'feedback' && !isFollowUp && question) {
-      // Preload follow-up for this question
-      preloadTts(question.followUp, currentQ, 'followup');
-    }
-    if (phase === 'followup-feedback' && question && currentQ < questions.length - 1) {
-      // Preload next question
-      preloadTts(questions[currentQ + 1].question, currentQ + 1, 'main');
-    }
-  }, [phase, isFollowUp, question, currentQ, questions, preloadTts]);
+    if (phase !== 'recording' && phase !== 'feedback') return;
+    const nextQ = currentQ + 1;
+    if (nextQ >= questions.length) return;
+    preloadTts(questions[nextQ].question, nextQ);
+  }, [phase, currentQ, questions, preloadTts]);
 
   const handleStartPractice = async () => {
     // Browsers only allow programmatic audio playback once the page has had a
@@ -510,10 +489,20 @@ export default function PracticePage() {
     }
   };
 
+  // Move to the next question, or end the session after the last one.
+  const goToNextQuestion = useCallback(() => {
+    if (currentQ < questions.length - 1) {
+      setCurrentQ((prev) => prev + 1);
+      setReadCountdown(READING_SECONDS);
+      setPhase('question');
+    } else {
+      setPhase('finished');
+    }
+  }, [currentQ, questions.length]);
+
   // Process answer: STT -> Feedback
-  const processAnswer = useCallback(async (answerText: string, questionText: string, isFollowUpAnswer: boolean) => {
+  const processAnswer = useCallback(async (answerText: string, questionText: string) => {
     const seq = ++feedbackSeqRef.current;
-    setProcessingStage('stt');
 
     // STT is already done at this point, answerText is the transcript
     // Now get feedback
@@ -532,29 +521,20 @@ export default function PracticePage() {
     if (feedbackResult) {
       setFeedback(feedbackResult);
       setLastAnswer(answerText);
-      setIsFollowUp(isFollowUpAnswer);
-      setPhase(isFollowUpAnswer ? 'followup-feedback' : 'feedback');
+      setPhase('feedback');
     } else {
-      // Feedback failed, move to next question
-      if (isFollowUpAnswer) {
-        if (currentQ < questions.length - 1) {
-          setCurrentQ((prev) => prev + 1);
-          setReadCountdown(READING_SECONDS);
-          setPhase('question');
-        } else {
-          setPhase('finished');
-        }
-      } else {
-        setReadCountdown(READING_SECONDS);
-        setPhase('followup');
-      }
+      // Feedback failed — the answer is still recorded, so move on rather
+      // than stranding the student on a screen with nothing to read.
+      goToNextQuestion();
     }
 
     setProcessingStage('idle');
-  }, [evaluationData, currentQ, questions.length]);
+  }, [evaluationData, goToNextQuestion]);
 
-  // Finish answer (main or follow-up)
-  const finishAnswer = useCallback(async (isFollowUpAnswer: boolean) => {
+  // Finish the answer: stop recording, transcribe, then ask for feedback.
+  // Unlike the interview, transcription has to finish here — the feedback is
+  // written against what the student actually said.
+  const finishAnswer = useCallback(async () => {
     if (isStopping || isProcessingRef.current || questions.length === 0) return;
     isProcessingRef.current = true;
     setIsStopping(true);
@@ -564,13 +544,12 @@ export default function PracticePage() {
     const audioBlob = await stopAndCollectAudio();
     setElapsed(0);
 
-    const currentQuestion = questions[currentQ];
-    const questionText = isFollowUpAnswer ? currentQuestion.followUp : currentQuestion.question;
+    const questionText = questions[currentQ].question;
 
     // Save transcript placeholder
     const index = addPracticeTranscript({
       question: questionText,
-      questionType: isFollowUpAnswer ? 'followup' : 'main',
+      questionType: 'main',
       answer: '',
     });
 
@@ -581,42 +560,27 @@ export default function PracticePage() {
     pendingTranscriptionsRef.current.push(Promise.resolve());
 
     // Process feedback
-    await processAnswer(transcript, questionText, isFollowUpAnswer);
+    await processAnswer(transcript, questionText);
 
     setIsStopping(false);
     isProcessingRef.current = false;
   }, [currentQ, isStopping, questions, stopAndCollectAudio, processAnswer]);
 
-  const handleFinishMainAnswer = () => finishAnswer(false);
-  const handleFinishFollowUp = () => finishAnswer(true);
+  const handleFinishAnswer = () => finishAnswer();
 
-  // Handle retry
+  // Answer the same question again after reading the feedback
   const handleRetry = () => {
     setFeedback(null);
     setLastAnswer('');
     setReadCountdown(READING_SECONDS);
-    setPhase(isFollowUp ? 'followup' : 'question');
+    setPhase('question');
   };
 
-  // Continue to next phase after feedback
+  // Continue to the next question after feedback
   const handleContinue = () => {
     setFeedback(null);
     setLastAnswer('');
-
-    if (isFollowUp) {
-      // Move to next question or finish
-      if (currentQ < questions.length - 1) {
-        setCurrentQ((prev) => prev + 1);
-        setReadCountdown(READING_SECONDS);
-        setPhase('question');
-      } else {
-        setPhase('finished');
-      }
-    } else {
-      // Move to follow-up
-      setReadCountdown(READING_SECONDS);
-      setPhase('followup');
-    }
+    goToNextQuestion();
   };
 
   // "Start Answering Now" — cut the examiner off and take the turn. Stopping
@@ -776,7 +740,7 @@ export default function PracticePage() {
         )}
 
         {/* Feedback Phase */}
-        {(phase === 'feedback' || phase === 'followup-feedback') && feedback && (
+        {phase === 'feedback' && feedback && (
           <div className="max-w-2xl mx-auto space-y-6">
             {/* Practice Focus Badge */}
             <div className="flex items-center justify-center">
@@ -851,9 +815,7 @@ export default function PracticePage() {
                 onClick={handleContinue}
                 className="rounded-xl bg-[#DA291C] px-6 py-3 text-sm font-semibold text-white shadow-lg shadow-[#DA291C]/20 transition-all hover:bg-[#B91C1C] hover:shadow-xl"
               >
-                {isFollowUp
-                  ? (currentQ < questions.length - 1 ? 'Next Question →' : 'Finish Practice')
-                  : 'Continue to Follow-up →'}
+                {currentQ < questions.length - 1 ? 'Next Question →' : 'Finish Practice'}
               </button>
             </div>
           </div>
@@ -884,7 +846,7 @@ export default function PracticePage() {
         )}
 
         {/* Practice Session - Question/Recording phases */}
-        {(phase === 'question' || phase === 'recording' || phase === 'followup' || phase === 'followup-recording') && question && (
+        {(phase === 'question' || phase === 'recording') && question && (
           <>
             {/* Status Bar */}
             <div className="flex items-center justify-between mb-4">
@@ -898,7 +860,7 @@ export default function PracticePage() {
                 {processingStage !== 'idle' && (
                   <span className="text-sm text-amber-600">{getStatusText()}</span>
                 )}
-                {!isRecording && processingStage === 'idle' && (phase === 'question' || phase === 'followup') && (
+                {!isRecording && processingStage === 'idle' && phase === 'question' && (
                   <span className="text-sm text-slate-400">Read the question…</span>
                 )}
               </div>
@@ -931,11 +893,11 @@ export default function PracticePage() {
               </div>
 
               {/* Question phase — TTS plays, text hidden unless unavailable */}
-              {(phase === 'question' || phase === 'followup') && (
+              {phase === 'question' && (
                 <div className="absolute inset-0 bg-black/50 flex items-center justify-center p-6">
                   <div className="max-w-2xl text-center">
                     <p className="text-white/60 text-xs uppercase tracking-wide mb-3">
-                      {phase === 'question' ? `Question ${currentQ + 1}` : 'Follow-up'}
+                      Question {currentQ + 1}
                     </p>
 
                     {speechStatus === 'loading' && (
@@ -960,7 +922,7 @@ export default function PracticePage() {
                     {speechStatus === 'unavailable' && (
                       <>
                         <p className="text-white text-lg sm:text-xl font-medium leading-relaxed drop-shadow">
-                          {phase === 'question' ? question.question : question.followUp}
+                          {question.question}
                         </p>
                         <p className="text-amber-300/90 text-xs mt-4">
                           Examiner audio unavailable — read the question instead.
@@ -976,15 +938,13 @@ export default function PracticePage() {
             </div>
 
             {/* "Didn't catch that?" — replay audio or reveal text */}
-            {(phase === 'recording' || phase === 'followup-recording') && (
+            {phase === 'recording' && (
               <div className="mt-4 space-y-4">
-                {phase === 'recording' && (
-                  <div className="rounded-xl border border-amber-100 bg-amber-50/50 p-3">
-                    <p className="text-xs text-amber-800">
-                      <span className="font-semibold">Focus area:</span> {question.contextHint}
-                    </p>
-                  </div>
-                )}
+                <div className="rounded-xl border border-amber-100 bg-amber-50/50 p-3">
+                  <p className="text-xs text-amber-800">
+                    <span className="font-semibold">Focus area:</span> {question.contextHint}
+                  </p>
+                </div>
 
                 {!showQuestionText ? (
                   <div className="bg-slate-50 rounded-xl p-4 text-center">
@@ -1017,11 +977,9 @@ export default function PracticePage() {
                   </div>
                 ) : (
                   <div className="bg-slate-50 rounded-xl p-4">
-                    <p className="text-xs text-slate-400 uppercase tracking-wide mb-2">
-                      {phase === 'recording' ? 'Question' : 'Follow-up'}
-                    </p>
+                    <p className="text-xs text-slate-400 uppercase tracking-wide mb-2">Question</p>
                     <p className="text-slate-700 text-base leading-relaxed">
-                      {phase === 'recording' ? question.question : question.followUp}
+                      {question.question}
                     </p>
                   </div>
                 )}
@@ -1051,10 +1009,10 @@ export default function PracticePage() {
       </main>
 
       {/* Sticky action bar */}
-      {(phase === 'question' || phase === 'followup' || phase === 'recording' || phase === 'followup-recording') && (
+      {(phase === 'question' || phase === 'recording') && (
         <div className="fixed bottom-0 inset-x-0 z-30 bg-white/95 backdrop-blur-sm border-t border-slate-100 shadow-[0_-4px_16px_rgba(0,0,0,0.06)]">
           <div className="max-w-4xl mx-auto px-6 py-4" style={{ paddingBottom: 'calc(1rem + env(safe-area-inset-bottom))' }}>
-            {phase === 'question' || phase === 'followup' ? (
+            {phase === 'question' ? (
               <button
                 onClick={handleStartAnswering}
                 className="w-full py-3.5 bg-[#DA291C] text-white rounded-xl font-medium hover:bg-[#B91C1C] transition-colors"
@@ -1063,7 +1021,7 @@ export default function PracticePage() {
               </button>
             ) : (
               <button
-                onClick={phase === 'recording' ? handleFinishMainAnswer : handleFinishFollowUp}
+                onClick={handleFinishAnswer}
                 disabled={isStopping || processingStage !== 'idle'}
                 className="w-full py-3.5 bg-slate-800 text-white rounded-xl font-medium hover:bg-slate-700 transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
               >

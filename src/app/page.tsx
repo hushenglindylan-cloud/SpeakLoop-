@@ -81,7 +81,7 @@ export default function LandingPage() {
               {
                 step: '02',
                 title: 'Mock Interview',
-                desc: 'Experience a realistic Part 3 interview with video examiner, timed responses, and natural follow-up questions.',
+                desc: 'Experience a realistic Part 3 interview with a video examiner, three spoken questions and timed responses.',
                 icon: (
                   <svg className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
                     <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 10.5l4.72-4.72a.75.75 0 011.28.53v11.38a.75.75 0 01-1.28.53l-4.72-4.72M4.5 18.75h9a2.25 2.25 0 002.25-2.25v-9a2.25 2.25 0 00-2.25-2.25h-9A2.25 2.25 0 002.25 7.5v9a2.25 2.25 0 002.25 2.25z" />

@@ -22,14 +22,7 @@ interface InterviewQuestion {
   difficulty: string;
 }
 
-type Phase = 'loading' | 'examiner-intro' | 'question' | 'recording' | 'followup' | 'followup-recording' | 'finished';
-
-// Simple generic follow-ups (used as fallback when API is unavailable)
-const fallbackFollowUps = [
-  'Can you give a specific example to support your point?',
-  'What about the opposite perspective — do you see any merit in it?',
-  'How do you think this might change in the future?',
-];
+type Phase = 'loading' | 'examiner-intro' | 'question' | 'recording' | 'finished';
 
 // Fallback only: when the examiner cannot be heard (synthesis failed, no voice
 // for this examiner, playback blocked), the question is shown instead and this
@@ -107,17 +100,15 @@ export default function InterviewPage() {
   const [currentQ, setCurrentQ] = useState(0);
   const [isRecording, setIsRecording] = useState(false);
   const [isStopping, setIsStopping] = useState(false);
-  // True from the moment "Finish Answer" is clicked until the next question/
-  // follow-up phase is actually on screen. isStopping alone isn't enough to
-  // guard against a double click: it flips back to false as soon as the
-  // MediaRecorder stops, but transcription + follow-up generation can still
-  // take many seconds afterward, during which the button would otherwise be
-  // re-enabled and a second click would submit the same answer twice.
+  // True from the moment "Finish Answer" is clicked until the next question is
+  // actually on screen. isStopping alone isn't enough to guard against a double
+  // click: it flips back to false as soon as the MediaRecorder stops, while
+  // saving the answer and moving to the next question runs on afterwards, and
+  // in that window a second click would submit the same answer twice.
   // isProcessingAnswerRef is the actual (synchronous) re-entry guard;
   // isProcessingAnswer just mirrors it for rendering.
   const isProcessingAnswerRef = useRef(false);
   const [isProcessingAnswer, setIsProcessingAnswer] = useState(false);
-  const [processingStage, setProcessingStage] = useState<'idle' | 'recording' | 'stt' | 'followup' | 'tts'>('idle');
   const [isFinalizing, setIsFinalizing] = useState(false);
   const [readCountdown, setReadCountdown] = useState(READING_SECONDS);
   const [elapsed, setElapsed] = useState(0);
@@ -127,7 +118,6 @@ export default function InterviewPage() {
   const audioChunksRef = useRef<Blob[]>([]);
   const recordedMimeTypeRef = useRef<string | undefined>(undefined);
   const pendingTranscriptionsRef = useRef<Promise<void>[]>([]);
-  const [followUpText, setFollowUpText] = useState<string>('');
 
   // --- Examiner speech -----------------------------------------------------
   // The interview is a spoken exam: the examiner asks out loud and the question
@@ -138,8 +128,6 @@ export default function InterviewPage() {
   const [showQuestionText, setShowQuestionText] = useState(false);
   const [examinerGender, setExaminerGender] = useState<string | null>(null);
   const questionAudioRef = useRef<HTMLAudioElement | null>(null);
-  // Which recording phase to enter once the examiner finishes speaking.
-  const nextRecordingPhaseRef = useRef<'recording' | 'followup-recording'>('recording');
   // Whether audio is loaded for the current question, so "Play again" is only
   // offered when there is something to replay. State, not a ref: the button's
   // visibility depends on it.
@@ -330,8 +318,7 @@ export default function InterviewPage() {
   // blocks playback — degrades to the readable fallback rather than leaving
   // the student with nothing: the text appears and the reading countdown runs.
   const speakQuestion = useCallback(
-    async (text: string, nextPhase: 'recording' | 'followup-recording', questionIndex?: number) => {
-      nextRecordingPhaseRef.current = nextPhase;
+    async (text: string, questionIndex: number) => {
       setShowQuestionText(false);
       setHasPlayableAudio(false);
 
@@ -347,7 +334,7 @@ export default function InterviewPage() {
       }
 
       // Check if we have a preloaded audio for this question
-      const cachedAudioUrl = questionIndex !== undefined ? ttsCacheRef.current.get(questionIndex) : undefined;
+      const cachedAudioUrl = ttsCacheRef.current.get(questionIndex);
 
       if (cachedAudioUrl) {
         // Use cached audio — instant playback
@@ -406,33 +393,25 @@ export default function InterviewPage() {
     setPhase('question');
   }, []);
 
-  const playFollowUpAndRecord = useCallback(() => {
-    isProcessingAnswerRef.current = false;
-    setIsProcessingAnswer(false);
-    setPhase('followup');
-  }, []);
-
   // Speak each question once when its phase begins. The key stops the effect
   // from re-synthesising the same question on unrelated re-renders.
   const lastSpokenKeyRef = useRef<string | null>(null);
 
   useEffect(() => {
-    if (phase !== 'question' && phase !== 'followup') {
+    if (phase !== 'question') {
       lastSpokenKeyRef.current = null;
       return;
     }
 
-    const text = phase === 'question'
-      ? questions[currentQ]?.question
-      : followUpText || fallbackFollowUps[currentQ % fallbackFollowUps.length];
+    const text = questions[currentQ]?.question;
     if (!text) return;
 
-    const spokenKey = `${phase}:${currentQ}`;
+    const spokenKey = `question:${currentQ}`;
     if (lastSpokenKeyRef.current === spokenKey) return;
     lastSpokenKeyRef.current = spokenKey;
 
-    speakQuestion(text, phase === 'question' ? 'recording' : 'followup-recording', phase === 'question' ? currentQ : undefined);
-  }, [phase, currentQ, questions, followUpText, speakQuestion]);
+    speakQuestion(text, currentQ);
+  }, [phase, currentQ, questions, speakQuestion]);
 
   // Preload TTS for the next main question while the student answers the current one.
   // Triggered when entering recording phase for a main question.
@@ -450,7 +429,7 @@ export default function InterviewPage() {
   // Reading countdown — only runs on the fallback path, when the examiner
   // could not be heard. When speech works, the audio ending starts recording.
   useEffect(() => {
-    if (phase !== 'question' && phase !== 'followup') return;
+    if (phase !== 'question') return;
     if (speechStatus !== 'unavailable') return;
     if (readCountdown <= 0) return;
     const timer = setTimeout(() => setReadCountdown((c) => c - 1), 1000);
@@ -460,18 +439,16 @@ export default function InterviewPage() {
   // Countdown finished (or was skipped) — open the microphone.
   useEffect(() => {
     if (readCountdown !== 0) return;
-    if (phase === 'question') {
-      startRecording();
-      setPhase('recording');
-    } else if (phase === 'followup') {
-      startRecording();
-      setPhase('followup-recording');
-    }
+    if (phase !== 'question') return;
+    startRecording();
+    setPhase('recording');
   }, [readCountdown, phase, startRecording]);
 
-  // Stop recording and move on — for main answers, we wait for transcription
-  // then call /api/follow-up to generate a contextual follow-up question.
-  const stopRecordingAndSave = useCallback(async (isFollowUp: boolean) => {
+  // Stop recording, bank the answer and move straight on to the next question.
+  // Transcription runs in the background: nothing in the interview depends on
+  // it any more, and handleGoToEvaluation waits for whatever is still in
+  // flight before the scoring page reads the transcript.
+  const stopRecordingAndSave = useCallback(async () => {
     // isProcessingAnswerRef (not React state) is the real guard: it's read
     // and written synchronously, so a second click that lands before the
     // next render can't slip through the way a state-based check could.
@@ -480,17 +457,14 @@ export default function InterviewPage() {
     setIsProcessingAnswer(true);
     setIsStopping(true);
     setIsRecording(false);
-    setProcessingStage('recording');
 
     // Releases the re-entry lock. Called on every exit path below, including
     // unexpected errors, so a failure never leaves the button permanently
-    // disabled. playQuestionAndRecord/playFollowUpAndRecord also clear it
-    // themselves for the normal-completion paths — calling it again here is
-    // a harmless no-op in that case.
+    // disabled. playQuestionAndRecord also clears it itself for the
+    // normal-completion path — calling it again here is a harmless no-op.
     const releaseLock = () => {
       isProcessingAnswerRef.current = false;
       setIsProcessingAnswer(false);
-      setProcessingStage('idle');
     };
 
     try {
@@ -500,85 +474,37 @@ export default function InterviewPage() {
 
       const currentQuestion = questions[currentQ];
 
-      if (isFollowUp) {
-        // Follow-up answer: save and move to next question or finish
-        const index = addTranscript({
-          question: followUpText || fallbackFollowUps[currentQ % fallbackFollowUps.length],
-          questionType: 'followup',
-          answer: '',
-        });
+      // Reserve this answer's place in question order now; the transcript is
+      // patched in when speech-to-text comes back.
+      const index = addTranscript({
+        question: currentQuestion.question,
+        questionType: 'main',
+        answer: '',
+      });
 
-        // STT runs in background — transcript saved when ready
-        setProcessingStage('stt');
-        pendingTranscriptionsRef.current.push(
-          transcribeAudio(audioBlob).then((transcript) => {
-            updateTranscriptAnswer(index, transcript);
-          })
-        );
+      pendingTranscriptionsRef.current.push(
+        transcribeAudio(audioBlob).then((transcript) => {
+          updateTranscriptAnswer(index, transcript);
+        })
+      );
 
-        if (currentQ < questions.length - 1) {
-          setCurrentQ((prev) => prev + 1);
-          setTimeout(() => {
-            playQuestionAndRecord();
-          }, 300);
-        } else {
-          releaseLock();
-          setPhase('finished');
-        }
-      } else {
-        // Main answer: transcribe first, then generate follow-up
-        const index = addTranscript({
-          question: currentQuestion.question,
-          questionType: 'main',
-          answer: '',
-        });
-
-        // STT — must complete before follow-up can be generated
-        setProcessingStage('stt');
-        const transcript = await transcribeAudio(audioBlob);
-        updateTranscriptAnswer(index, transcript);
-
-        // Follow-up generation — depends on transcript
-        setProcessingStage('followup');
-        let followUp = fallbackFollowUps[currentQ % fallbackFollowUps.length];
-        try {
-          const session = getSession();
-          const examiner = examiners.find((e) => e.id === session?.examinerId);
-          const res = await fetch('/api/follow-up', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              mainQuestion: currentQuestion.question,
-              answer: transcript,
-              topic: currentQuestion.topic,
-              examinerPersonality: examiner?.personality,
-            }),
-          });
-          if (res.ok) {
-            const data = await res.json();
-            if (data.followUp) {
-              followUp = data.followUp;
-            }
-          }
-        } catch (err) {
-          console.error('Follow-up generation failed, using fallback:', err);
-        }
-
-        // TTS — follow-up text is ready, synthesize audio
-        setProcessingStage('tts');
-        setFollowUpText(followUp);
+      if (currentQ < questions.length - 1) {
+        setCurrentQ((prev) => prev + 1);
         setTimeout(() => {
-          playFollowUpAndRecord();
+          playQuestionAndRecord();
         }, 300);
+      } else {
+        releaseLock();
+        setPhase('finished');
       }
     } catch (err) {
-      // Unexpected failure somewhere in the stop/transcribe/follow-up chain —
-      // release the lock so the student isn't stuck with a dead button.
+      // Unexpected failure somewhere in the stop/save chain — release the lock
+      // so the student isn't stuck with a dead button.
       console.error('stopRecordingAndSave failed:', err);
       setIsStopping(false);
       releaseLock();
     }
-  }, [currentQ, isStopping, questions, followUpText, playQuestionAndRecord, playFollowUpAndRecord, stopAndCollectAudio]);
+  }, [currentQ, isStopping, questions, playQuestionAndRecord, stopAndCollectAudio]);
 
   const handleStartQuestion = () => {
     // Browsers only allow programmatic audio playback once the page has had a
@@ -597,12 +523,8 @@ export default function InterviewPage() {
     playQuestionAndRecord();
   };
 
-  const handleFinishMainAnswer = () => {
-    stopRecordingAndSave(false);
-  };
-
-  const handleFinishFollowUp = () => {
-    stopRecordingAndSave(true);
+  const handleFinishAnswer = () => {
+    stopRecordingAndSave();
   };
 
   // Skip the remaining reading time and start answering now (fallback path).
@@ -626,10 +548,10 @@ export default function InterviewPage() {
   // phase because this also fires when the student replays the question while
   // already recording, which must not restart the recorder.
   const handleQuestionAudioEnded = () => {
-    if (phase !== 'question' && phase !== 'followup') return;
+    if (phase !== 'question') return;
     setSpeechStatus('idle');
     startRecording();
-    setPhase(nextRecordingPhaseRef.current);
+    setPhase('recording');
   };
 
   const handleQuestionAudioError = () => {
@@ -713,19 +635,13 @@ export default function InterviewPage() {
                 <span className="text-sm text-slate-500">Recording in progress...</span>
               </>
             )}
-            {!isRecording && (phase === 'question' || phase === 'followup') && (
+            {!isRecording && phase === 'question' && (
               <span className="text-sm text-slate-400">
                 {speechStatus === 'unavailable' ? 'Read the question…' : 'Examiner is speaking…'}
               </span>
             )}
             {!isRecording && isProcessingAnswer && (
-              <span className="text-sm text-slate-400">
-                {processingStage === 'recording' ? 'Answer recorded…' :
-                 processingStage === 'stt' ? 'Preparing your follow-up…' :
-                 processingStage === 'followup' ? 'Generating follow-up question…' :
-                 processingStage === 'tts' ? 'Preparing follow-up audio…' :
-                 'Processing your answer…'}
-              </span>
+              <span className="text-sm text-slate-400">Saving your answer…</span>
             )}
           </div>
           {isRecording && (
@@ -755,11 +671,11 @@ export default function InterviewPage() {
           {/* Question phase. Spoken exam: while the examiner is speaking the
               question is heard, not shown. The text only appears here when
               speech is unavailable and the student would otherwise be stuck. */}
-          {(phase === 'question' || phase === 'followup') && (
+          {phase === 'question' && (
             <div className="absolute inset-0 bg-black/50 flex items-center justify-center p-6">
               <div className="max-w-2xl text-center">
                 <p className="text-white/60 text-xs uppercase tracking-wide mb-3">
-                  {phase === 'question' ? `Question ${currentQ + 1}` : 'Follow-up'}
+                  Question {currentQ + 1}
                 </p>
 
                 {speechStatus === 'loading' && (
@@ -784,9 +700,7 @@ export default function InterviewPage() {
                 {speechStatus === 'unavailable' && (
                   <>
                     <p className="text-white text-lg sm:text-xl font-medium leading-relaxed drop-shadow">
-                      {phase === 'question'
-                        ? questions[currentQ]?.question
-                        : followUpText || fallbackFollowUps[currentQ % fallbackFollowUps.length]}
+                      {questions[currentQ]?.question}
                     </p>
                     <p className="text-amber-300/90 text-xs mt-4">
                       Examiner audio unavailable — read the question instead.
@@ -819,7 +733,7 @@ export default function InterviewPage() {
         {/* Answering. This is a listening exam, so the question stays unseen by
             default — the student who missed it can replay the audio or, as a
             last resort, reveal the text. */}
-        {(phase === 'recording' || phase === 'followup-recording') && (
+        {phase === 'recording' && (
           <div className="mt-4">
             {!showQuestionText ? (
               <div className="bg-slate-50 rounded-xl p-4 text-center">
@@ -840,13 +754,9 @@ export default function InterviewPage() {
               </div>
             ) : (
               <div className="bg-slate-50 rounded-xl p-4">
-                <p className="text-xs text-slate-400 uppercase tracking-wide mb-2">
-                  {phase === 'recording' ? 'Question' : 'Follow-up'}
-                </p>
+                <p className="text-xs text-slate-400 uppercase tracking-wide mb-2">Question</p>
                 <p className="text-slate-700 text-base leading-relaxed">
-                  {phase === 'recording'
-                    ? questions[currentQ]?.question
-                    : followUpText || fallbackFollowUps[currentQ % fallbackFollowUps.length]}
+                  {questions[currentQ]?.question}
                 </p>
               </div>
             )}
@@ -889,7 +799,7 @@ export default function InterviewPage() {
 
           {/* Only offered on the fallback path: while the examiner is actually
               speaking, cutting them off to start answering makes no sense. */}
-          {(phase === 'question' || phase === 'followup') && speechStatus === 'unavailable' && (
+          {phase === 'question' && speechStatus === 'unavailable' && (
             <button
               onClick={handleStartAnswering}
               className="w-full py-3.5 bg-[#DA291C] text-white rounded-xl font-medium hover:bg-[#B91C1C] transition-colors"
@@ -898,19 +808,13 @@ export default function InterviewPage() {
             </button>
           )}
 
-          {(phase === 'recording' || phase === 'followup-recording') && (
+          {phase === 'recording' && (
             <button
-              onClick={phase === 'recording' ? handleFinishMainAnswer : handleFinishFollowUp}
+              onClick={handleFinishAnswer}
               disabled={isStopping || isProcessingAnswer}
               className="w-full py-3.5 bg-slate-800 text-white rounded-xl font-medium hover:bg-slate-700 transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
             >
-              {isProcessingAnswer
-                ? (processingStage === 'recording' ? 'Answer recorded…' :
-                   processingStage === 'stt' ? 'Transcribing…' :
-                   processingStage === 'followup' ? 'Preparing follow-up…' :
-                   processingStage === 'tts' ? 'Preparing audio…' :
-                   'Processing…')
-                : 'Finish Answer'}
+              {isProcessingAnswer ? 'Saving your answer…' : 'Finish Answer'}
             </button>
           )}
 

@@ -1,5 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { retrieveQuestions, type Question } from '@/lib/rag/retrieval';
+import {
+  convertPromptToQuestion,
+  parseDifficulty,
+  pickDiverseQuestions,
+} from '@/lib/rag/question-text';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -27,75 +32,7 @@ interface RequestBody {
 // ---------------------------------------------------------------------------
 
 /**
- * Pick diverse questions from candidates (different topics).
- * Returns up to `count` questions with unique topics.
- */
-function pickDiverseQuestions(candidates: Question[], count: number): Question[] {
-  const seen = new Set<string>();
-  const picked: Question[] = [];
-
-  for (const q of candidates) {
-    if (!seen.has(q.topic) && picked.length < count) {
-      seen.add(q.topic);
-      picked.push(q);
-    }
-  }
-
-  // Fill remaining if needed (topics may repeat)
-  while (picked.length < count && picked.length < candidates.length) {
-    picked.push(candidates[picked.length]);
-  }
-
-  return picked;
-}
-
-/**
- * Convert a raw question bank prompt into a natural spoken English question.
- * Uses the verb tag (questionType) to determine the question format.
- */
-export function convertPromptToQuestion(q: Question): string {
-  const text = q.question;
-  const verb = q.questionType.toLowerCase();
-
-  // If it already looks like a question, return as-is
-  if (text.endsWith('?')) return text;
-
-  switch (verb) {
-    case 'agree/disagree':
-      return `To what extent do you agree or disagree: ${text}?`;
-    case 'compare':
-      return `What are the differences between the aspects mentioned: ${text}?`;
-    case 'consider':
-      return `Consider the following: ${text}. What are your thoughts?`;
-    case 'evaluate':
-      return `How would you evaluate: ${text}?`;
-    case 'assess':
-      return `How would you assess: ${text}?`;
-    case 'identify':
-      return `Can you identify: ${text}?`;
-    case 'suggest':
-      return `Can you suggest: ${text}?`;
-    case 'describe':
-      return `Can you describe: ${text}?`;
-    case 'discuss':
-      return `Let's discuss: ${text}. What do you think?`;
-    case 'comment on':
-      return `What is your comment on: ${text}?`;
-    case 'explain':
-      return `Can you explain: ${text}?`;
-    case 'justify':
-      return `How would you justify: ${text}?`;
-    case 'outline':
-      return `Can you outline: ${text}?`;
-    case 'give reasons':
-      return `What are the reasons for: ${text}?`;
-    default:
-      return `What are your thoughts on: ${text}?`;
-  }
-}
-
-/**
- * Build finalized interview questions from RAG candidates.
+ * Build the three interview questions from RAG candidates.
  * Fast path — no LLM call, uses rule-based conversion.
  */
 function buildQuestions(candidates: Question[]): InterviewQuestion[] {
@@ -118,10 +55,24 @@ function buildQuestions(candidates: Question[]): InterviewQuestion[] {
 export async function POST(request: NextRequest) {
   try {
     const body = (await request.json()) as RequestBody;
-    const difficulty = (body.examiner?.difficulty || 'Standard') as 'Easy' | 'Standard' | 'Challenging';
+
+    // The examiner the student picked sets the level of the whole interview.
+    // An unrecognised label is refused rather than quietly levelled down to
+    // Standard — a candidate who chose Challenging must not be handed a
+    // Standard paper without anyone noticing.
+    const difficulty = parseDifficulty(body.examiner?.difficulty);
+    if (!difficulty) {
+      return NextResponse.json({
+        error: `Unknown difficulty "${body.examiner?.difficulty}". Expected Easy, Standard or Challenging.`,
+        questions: [],
+      });
+    }
+
     const excludeIds = body.excludeQuestionIds || [];
 
-    // Step 1: Retrieve candidates from RAG
+    // Step 1: Retrieve candidates from RAG — every candidate is labelled with
+    // this difficulty in the question bank, so the three that come out of
+    // buildQuestions are at the level the student chose.
     const { questions: candidates } = retrieveQuestions({
       count: 9,
       difficulty,
