@@ -7,6 +7,7 @@ import { examiners, type Examiner } from '@/lib/mock/data';
 import { StepIndicator } from '@/components/step-indicator';
 import { initSession } from '@/lib/store/interview-session';
 import { getExaminerPortrait } from '@/lib/examiner-portraits';
+import { isExaminerSupported } from '@/lib/tts-voices';
 
 type FilterKey = 'nationality' | 'gender' | 'personality' | 'difficulty';
 
@@ -41,7 +42,12 @@ export default function ExaminerPage() {
     difficulty: null,
   });
 
-  const filtered = examiners.filter((e) =>
+  // Only examiners whose accent and gender have a real voice are offered. An
+  // IELTS candidate hearing an American voice from a British examiner is worse
+  // than not being offered the British examiner at all — see lib/tts-voices.ts.
+  const selectable = examiners.filter(isExaminerSupported);
+
+  const filtered = selectable.filter((e) =>
     Object.entries(activeFilters).every(
       ([key, val]) => val === null || e[key as FilterKey] === val
     )

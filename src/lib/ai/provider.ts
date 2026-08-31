@@ -1,15 +1,27 @@
-// Unified AI provider for SpeakLoop — single DASHSCOPE_API_KEY, two models.
+// Unified AI provider for SpeakLoop — single DASHSCOPE_API_KEY, three models.
 //
 // STT:  qwen3-asr-flash  — audio → transcript
 // LLM:  qwen3.5-flash    — text → structured AI decisions
+// TTS:  qwen3-tts-flash  — examiner question text → spoken audio
 //
-// Both use the DashScope OpenAI-compatible endpoint (Beijing region).
+// STT and LLM use the DashScope OpenAI-compatible endpoint; TTS uses
+// DashScope's native multimodal-generation endpoint, which is a different base
+// URL and request shape (see synthesizeSpeech).
 // This module is server-only; the API key must never reach the client bundle.
 
 import { randomUUID } from 'crypto';
 
 const DASHSCOPE_BASE_URL =
   'https://dashscope.aliyuncs.com/compatible-mode/v1';
+
+// Qwen-TTS is not served from the OpenAI-compatible surface — it has its own
+// native endpoint. Overridable because the Singapore region uses a different
+// host (and its API keys are not interchangeable with Beijing's).
+const DASHSCOPE_TTS_URL =
+  process.env.DASHSCOPE_TTS_URL ||
+  'https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation';
+
+const TTS_MODEL = process.env.DASHSCOPE_TTS_MODEL || 'qwen3-tts-flash';
 
 // Generate a short request ID for tracing
 function requestId(): string {
@@ -257,6 +269,117 @@ export async function llmChat(options: LLMChatOptions): Promise<string> {
     }
 
     throw new Error('LLM returned empty content');
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// TTS — qwen3-tts-flash
+// ---------------------------------------------------------------------------
+
+export interface TTSResult {
+  /** URL of the synthesised audio. DashScope expires these after 24 hours. */
+  audioUrl: string;
+}
+
+export interface TTSError {
+  error: string;
+  stage: string;
+  detail?: string;
+}
+
+/**
+ * Speak a question in the examiner's voice.
+ *
+ * Uses the non-streaming mode, which answers with a URL to the finished audio
+ * rather than the bytes: the browser then fetches it straight from DashScope,
+ * so the audio never has to be relayed through this server.
+ *
+ * Note this endpoint is NOT the OpenAI-compatible one used elsewhere in this
+ * module — Qwen-TTS is served from DashScope's native multimodal-generation
+ * API, with the payload nested under `input` and the result at
+ * `output.audio.url`.
+ */
+export async function synthesizeSpeech(options: {
+  text: string;
+  voice: string;
+  /** Matching the text's language gives correct pronunciation and intonation. */
+  languageType?: string;
+  timeoutMs?: number;
+}): Promise<TTSResult | TTSError> {
+  const { text, voice, languageType = 'English', timeoutMs = 30_000 } = options;
+
+  if (!text.trim()) {
+    return { error: 'Nothing to speak.', stage: 'tts-empty-text' };
+  }
+
+  let apiKey: string;
+  try {
+    apiKey = getApiKey();
+  } catch (err) {
+    return {
+      error: 'Speech synthesis is not configured.',
+      stage: 'tts-no-api-key',
+      detail: err instanceof Error ? err.message : String(err),
+    };
+  }
+
+  const timeoutController = new AbortController();
+  const timeoutId = setTimeout(() => timeoutController.abort(), timeoutMs);
+  const reqId = requestId();
+
+  try {
+    const response = await fetch(DASHSCOPE_TTS_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({
+        model: TTS_MODEL,
+        input: { text, voice, language_type: languageType },
+      }),
+      signal: timeoutController.signal,
+    });
+
+    if (!response.ok) {
+      const rawText = await response.text().catch(() => '');
+      console.error(`[TTS:${reqId}] DashScope error ${response.status}: ${rawText.slice(0, 300)}`);
+      return {
+        error: 'Could not generate the examiner audio.',
+        stage: 'tts-http-error',
+        detail: `status ${response.status}: ${rawText.slice(0, 300)}`,
+      };
+    }
+
+    interface TTSResponse {
+      output?: { audio?: { url?: string } };
+      message?: string;
+    }
+    const data = (await response.json()) as TTSResponse;
+    const audioUrl = data?.output?.audio?.url;
+
+    if (typeof audioUrl === 'string' && audioUrl.length > 0) {
+      return { audioUrl };
+    }
+
+    console.error(`[TTS:${reqId}] No audio URL in response:`, JSON.stringify(data).slice(0, 300));
+    return {
+      error: 'Could not generate the examiner audio.',
+      stage: 'tts-no-audio-url',
+      detail: data?.message,
+    };
+  } catch (err) {
+    const isTimeout = err instanceof Error && err.name === 'AbortError';
+    console.error(`[TTS:${reqId}] ${isTimeout ? 'timed out' : 'failed'}:`, err);
+    return {
+      error: isTimeout
+        ? 'The examiner audio took too long to generate.'
+        : 'Could not generate the examiner audio.',
+      stage: isTimeout ? 'tts-timeout' : 'tts-error',
+      detail: err instanceof Error ? err.message : String(err),
+    };
   } finally {
     clearTimeout(timeoutId);
   }

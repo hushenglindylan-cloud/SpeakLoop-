@@ -31,9 +31,9 @@ const fallbackFollowUps = [
   'How do you think this might change in the future?',
 ];
 
-// Seconds the question stays on screen before recording starts. There is no
-// TTS yet (PRD §9), so the examiner asks in text and this is the student's
-// window to read it — not a stand-in for audio playback. They can skip it.
+// Fallback only: when the examiner cannot be heard (synthesis failed, no voice
+// for this examiner, playback blocked), the question is shown instead and this
+// is how long the student gets to read it before the microphone opens.
 const READING_SECONDS = 6;
 
 // Pick the best audio format the current browser actually supports for
@@ -128,6 +128,22 @@ export default function InterviewPage() {
   const pendingTranscriptionsRef = useRef<Promise<void>[]>([]);
   const [followUpText, setFollowUpText] = useState<string>('');
 
+  // --- Examiner speech -----------------------------------------------------
+  // The interview is a spoken exam: the examiner asks out loud and the question
+  // text stays hidden unless the student asks for it. `speechStatus` drives
+  // that — only when speech is 'unavailable' does the text appear on its own,
+  // because a student who can neither hear nor read the question is stuck.
+  const [speechStatus, setSpeechStatus] = useState<'idle' | 'loading' | 'playing' | 'unavailable'>('idle');
+  const [showQuestionText, setShowQuestionText] = useState(false);
+  const [examinerVoiceContext, setExaminerVoiceContext] = useState<{ nationality: string; gender: string } | null>(null);
+  const questionAudioRef = useRef<HTMLAudioElement | null>(null);
+  // Which recording phase to enter once the examiner finishes speaking.
+  const nextRecordingPhaseRef = useRef<'recording' | 'followup-recording'>('recording');
+  // Whether audio is loaded for the current question, so "Play again" is only
+  // offered when there is something to replay. State, not a ref: the button's
+  // visibility depends on it.
+  const [hasPlayableAudio, setHasPlayableAudio] = useState(false);
+
   // Fetch questions from RAG + LLM on mount. Single-flight: without the guard
   // this runs twice under dev StrictMode, which burns a second LLM selection,
   // lets the later response replace the questions already on screen, and
@@ -151,6 +167,8 @@ export default function InterviewPage() {
       if (examiner) {
         setExaminerPortrait(getExaminerPortrait(examiner.id));
         setExaminerName(examiner.name);
+        // The voice is chosen server-side from these two attributes.
+        setExaminerVoiceContext({ nationality: examiner.nationality, gender: examiner.gender });
       }
       const excludeIds: string[] = [];
 
@@ -260,29 +278,109 @@ export default function InterviewPage() {
     });
   }, []);
 
-  // Show the question and give the student a moment to read it before the
-  // microphone opens.
+  // Speak a question aloud, then open the microphone when the audio ends.
+  // Any failure — synthesis error, no voice for this examiner, a browser that
+  // blocks playback — degrades to the readable fallback rather than leaving
+  // the student with nothing: the text appears and the reading countdown runs.
+  const speakQuestion = useCallback(
+    async (text: string, nextPhase: 'recording' | 'followup-recording') => {
+      nextRecordingPhaseRef.current = nextPhase;
+      setShowQuestionText(false);
+      setHasPlayableAudio(false);
+
+      const fallbackToText = () => {
+        setSpeechStatus('unavailable');
+        setShowQuestionText(true);
+        setReadCountdown(READING_SECONDS);
+      };
+
+      if (!examinerVoiceContext) {
+        fallbackToText();
+        return;
+      }
+
+      setSpeechStatus('loading');
+      try {
+        const res = await fetch('/api/tts', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            text,
+            nationality: examinerVoiceContext.nationality,
+            gender: examinerVoiceContext.gender,
+          }),
+        });
+        const data = await res.json();
+
+        if (!data?.audioUrl) {
+          console.error('TTS unavailable:', data);
+          fallbackToText();
+          return;
+        }
+
+        const audio = questionAudioRef.current;
+        if (!audio) {
+          fallbackToText();
+          return;
+        }
+
+        setHasPlayableAudio(true);
+        audio.src = data.audioUrl;
+        setSpeechStatus('playing');
+        await audio.play();
+      } catch (err) {
+        // Includes the autoplay rejection: if the browser refuses to play
+        // without a gesture, reading the question is the only way forward.
+        console.error('Examiner speech failed:', err);
+        fallbackToText();
+      }
+    },
+    [examinerVoiceContext]
+  );
+
   const playQuestionAndRecord = useCallback(() => {
     isProcessingAnswerRef.current = false;
     setIsProcessingAnswer(false);
-    setReadCountdown(READING_SECONDS);
     setPhase('question');
   }, []);
 
   const playFollowUpAndRecord = useCallback(() => {
     isProcessingAnswerRef.current = false;
     setIsProcessingAnswer(false);
-    setReadCountdown(READING_SECONDS);
     setPhase('followup');
   }, []);
 
-  // Tick the reading countdown down while a question is on screen.
+  // Speak each question once when its phase begins. The key stops the effect
+  // from re-synthesising the same question on unrelated re-renders.
+  const lastSpokenKeyRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (phase !== 'question' && phase !== 'followup') {
+      lastSpokenKeyRef.current = null;
+      return;
+    }
+
+    const text = phase === 'question'
+      ? questions[currentQ]?.question
+      : followUpText || fallbackFollowUps[currentQ % fallbackFollowUps.length];
+    if (!text) return;
+
+    const spokenKey = `${phase}:${currentQ}`;
+    if (lastSpokenKeyRef.current === spokenKey) return;
+    lastSpokenKeyRef.current = spokenKey;
+
+    speakQuestion(text, phase === 'question' ? 'recording' : 'followup-recording');
+  }, [phase, currentQ, questions, followUpText, speakQuestion]);
+
+  // Reading countdown — only runs on the fallback path, when the examiner
+  // could not be heard. When speech works, the audio ending starts recording.
   useEffect(() => {
     if (phase !== 'question' && phase !== 'followup') return;
+    if (speechStatus !== 'unavailable') return;
     if (readCountdown <= 0) return;
     const timer = setTimeout(() => setReadCountdown((c) => c - 1), 1000);
     return () => clearTimeout(timer);
-  }, [phase, readCountdown]);
+  }, [phase, readCountdown, speechStatus]);
 
   // Countdown finished (or was skipped) — open the microphone.
   useEffect(() => {
@@ -399,6 +497,19 @@ export default function InterviewPage() {
   }, [currentQ, isStopping, questions, followUpText, playQuestionAndRecord, playFollowUpAndRecord, stopAndCollectAudio]);
 
   const handleStartQuestion = () => {
+    // Browsers only allow programmatic audio playback once the page has had a
+    // real user gesture. This click is that gesture, so prime the element here
+    // — every later question then plays without another tap.
+    const audio = questionAudioRef.current;
+    if (audio) {
+      audio.muted = true;
+      audio.play().catch(() => {
+        // Priming failed; speakQuestion still falls back to text if needed.
+      });
+      audio.pause();
+      audio.currentTime = 0;
+      audio.muted = false;
+    }
     playQuestionAndRecord();
   };
 
@@ -410,9 +521,38 @@ export default function InterviewPage() {
     stopRecordingAndSave(true);
   };
 
-  // Skip the remaining reading time and start answering now.
+  // Skip the remaining reading time and start answering now (fallback path).
   const handleStartAnswering = () => {
     setReadCountdown(0);
+  };
+
+  // "Didn't catch that?" — replay the examiner's audio, or reveal the text.
+  const handleReplayQuestion = () => {
+    const audio = questionAudioRef.current;
+    if (!audio || !hasPlayableAudio) return;
+    audio.currentTime = 0;
+    audio.play().catch((err) => console.error('Replay failed:', err));
+  };
+
+  const handleViewQuestionText = () => {
+    setShowQuestionText(true);
+  };
+
+  // The examiner finished speaking — the student's turn starts now. Guarded on
+  // phase because this also fires when the student replays the question while
+  // already recording, which must not restart the recorder.
+  const handleQuestionAudioEnded = () => {
+    if (phase !== 'question' && phase !== 'followup') return;
+    setSpeechStatus('idle');
+    startRecording();
+    setPhase(nextRecordingPhaseRef.current);
+  };
+
+  const handleQuestionAudioError = () => {
+    console.error('Examiner audio failed to load');
+    setSpeechStatus('unavailable');
+    setShowQuestionText(true);
+    setReadCountdown(READING_SECONDS);
   };
 
   // The only point in the flow where we wait on background transcription —
@@ -430,6 +570,15 @@ export default function InterviewPage() {
 
   return (
     <div className="min-h-screen bg-white pb-32">
+      {/* The examiner's voice. One element reused for every question so the
+          autoplay permission earned on the first user gesture keeps applying. */}
+      <audio
+        ref={questionAudioRef}
+        onEnded={handleQuestionAudioEnded}
+        onError={handleQuestionAudioError}
+        className="hidden"
+      />
+
       {/* Header */}
       <header className="border-b border-slate-100">
         <div className="max-w-5xl mx-auto px-6 py-4 flex items-center justify-between">
@@ -481,7 +630,9 @@ export default function InterviewPage() {
               </>
             )}
             {!isRecording && (phase === 'question' || phase === 'followup') && (
-              <span className="text-sm text-slate-400">Read the question…</span>
+              <span className="text-sm text-slate-400">
+                {speechStatus === 'unavailable' ? 'Read the question…' : 'Examiner is speaking…'}
+              </span>
             )}
             {!isRecording && isProcessingAnswer && (
               <span className="text-sm text-slate-400">Processing your answer…</span>
@@ -511,22 +662,50 @@ export default function InterviewPage() {
             </div>
           )}
 
-          {/* Question phase — the question itself is the delivery mechanism,
-              since there is no examiner audio to listen to. */}
+          {/* Question phase. Spoken exam: while the examiner is speaking the
+              question is heard, not shown. The text only appears here when
+              speech is unavailable and the student would otherwise be stuck. */}
           {(phase === 'question' || phase === 'followup') && (
             <div className="absolute inset-0 bg-black/50 flex items-center justify-center p-6">
               <div className="max-w-2xl text-center">
                 <p className="text-white/60 text-xs uppercase tracking-wide mb-3">
                   {phase === 'question' ? `Question ${currentQ + 1}` : 'Follow-up'}
                 </p>
-                <p className="text-white text-lg sm:text-xl font-medium leading-relaxed drop-shadow">
-                  {phase === 'question'
-                    ? questions[currentQ]?.question
-                    : followUpText || fallbackFollowUps[currentQ % fallbackFollowUps.length]}
-                </p>
-                <p className="text-white/70 text-sm mt-5">
-                  Recording starts in {readCountdown}s
-                </p>
+
+                {speechStatus === 'loading' && (
+                  <p className="text-white/90 text-base font-medium">Examiner is about to speak…</p>
+                )}
+
+                {speechStatus === 'playing' && (
+                  <>
+                    <div className="flex items-end justify-center gap-1 mb-3 h-6">
+                      {[0, 1, 2, 3, 4].map((i) => (
+                        <span
+                          key={i}
+                          className="w-1 bg-white/80 rounded-full animate-pulse"
+                          style={{ height: `${10 + ((i * 7) % 14)}px`, animationDelay: `${i * 0.12}s` }}
+                        />
+                      ))}
+                    </div>
+                    <p className="text-white/90 text-base font-medium">Listen to the examiner…</p>
+                  </>
+                )}
+
+                {speechStatus === 'unavailable' && (
+                  <>
+                    <p className="text-white text-lg sm:text-xl font-medium leading-relaxed drop-shadow">
+                      {phase === 'question'
+                        ? questions[currentQ]?.question
+                        : followUpText || fallbackFollowUps[currentQ % fallbackFollowUps.length]}
+                    </p>
+                    <p className="text-amber-300/90 text-xs mt-4">
+                      Examiner audio unavailable — read the question instead.
+                    </p>
+                    <p className="text-white/70 text-sm mt-2">
+                      Recording starts in {readCountdown}s
+                    </p>
+                  </>
+                )}
               </div>
             </div>
           )}
@@ -547,21 +726,40 @@ export default function InterviewPage() {
           )}
         </div>
 
-        {/* The question stays on screen while answering — with no audio there
-            is nothing to "not catch", so hiding it behind a toggle only made
-            the student work to see what they were answering. */}
+        {/* Answering. This is a listening exam, so the question stays unseen by
+            default — the student who missed it can replay the audio or, as a
+            last resort, reveal the text. */}
         {(phase === 'recording' || phase === 'followup-recording') && (
           <div className="mt-4">
-            <div className="bg-slate-50 rounded-xl p-4">
-              <p className="text-xs text-slate-400 uppercase tracking-wide mb-2">
-                {phase === 'recording' ? 'Question' : 'Follow-up'}
-              </p>
-              <p className="text-slate-700 text-base leading-relaxed">
-                {phase === 'recording'
-                  ? questions[currentQ]?.question
-                  : followUpText || fallbackFollowUps[currentQ % fallbackFollowUps.length]}
-              </p>
-            </div>
+            {!showQuestionText ? (
+              <div className="bg-slate-50 rounded-xl p-4 text-center">
+                <p className="text-slate-500 text-sm">
+                  Didn&apos;t catch that?{' '}
+                  {hasPlayableAudio && (
+                    <>
+                      <button onClick={handleReplayQuestion} className="text-[#DA291C] font-medium hover:underline">
+                        Play again
+                      </button>
+                      {' · '}
+                    </>
+                  )}
+                  <button onClick={handleViewQuestionText} className="text-[#DA291C] font-medium hover:underline">
+                    View question text
+                  </button>
+                </p>
+              </div>
+            ) : (
+              <div className="bg-slate-50 rounded-xl p-4">
+                <p className="text-xs text-slate-400 uppercase tracking-wide mb-2">
+                  {phase === 'recording' ? 'Question' : 'Follow-up'}
+                </p>
+                <p className="text-slate-700 text-base leading-relaxed">
+                  {phase === 'recording'
+                    ? questions[currentQ]?.question
+                    : followUpText || fallbackFollowUps[currentQ % fallbackFollowUps.length]}
+                </p>
+              </div>
+            )}
           </div>
         )}
 
@@ -599,7 +797,9 @@ export default function InterviewPage() {
             </button>
           )}
 
-          {(phase === 'question' || phase === 'followup') && (
+          {/* Only offered on the fallback path: while the examiner is actually
+              speaking, cutting them off to start answering makes no sense. */}
+          {(phase === 'question' || phase === 'followup') && speechStatus === 'unavailable' && (
             <button
               onClick={handleStartAnswering}
               className="w-full py-3.5 bg-[#DA291C] text-white rounded-xl font-medium hover:bg-[#B91C1C] transition-colors"

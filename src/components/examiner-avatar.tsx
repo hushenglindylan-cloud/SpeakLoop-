@@ -12,9 +12,6 @@ interface ExaminerAvatarProps {
  * Overlays state indicators on top of the portrait.
  */
 export function ExaminerAvatar({ src, name, phase }: ExaminerAvatarProps) {
-  // There is no TTS yet (PRD §9), so questions are delivered as text. Nothing
-  // here may suggest audio is playing — the examiner "asks" by putting the
-  // question on screen.
   const isAsking = phase === 'question' || phase === 'followup';
   const isListening = phase === 'recording' || phase === 'followup-recording';
 
