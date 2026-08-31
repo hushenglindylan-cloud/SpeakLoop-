@@ -1,4 +1,5 @@
 import crypto from 'crypto';
+import { Agent, WebSocket as UndiciWebSocket } from 'undici';
 
 // iFlytek (讯飞) 实时语音转写大模型 — WebSocket streaming transcription.
 //
@@ -18,6 +19,16 @@ import crypto from 'crypto';
 //   accessKeySecret = APISecret   (signing key)
 
 const AST_HOST = 'wss://office-api-ast-dx.iflyaisol.com/ast/communicate/v1';
+
+// The server offers HTTP/2 (confirmed via curl: ALPN negotiates h2 for a
+// plain request to this host). WebSocket's Upgrade handshake is an
+// HTTP/1.1-only mechanism; if the TLS ALPN negotiation for the WebSocket
+// connection is allowed to settle on h2, the connection gets torn down
+// before any WebSocket data is exchanged (a bare close code 1006, which is
+// exactly what production hit — see the trace fields below). Using
+// undici's WebSocket with allowH2 left off (its default) forces the ALPN
+// offer to http/1.1 only, so the server has no h2 option to pick.
+const ast_agent = new Agent({ allowH2: false });
 
 // The docs specify 1280 bytes every 40 ms and warn that sending faster can
 // break the engine — error code 100001 is literally "上传音频速度超出限制".
@@ -161,7 +172,7 @@ export async function transcribeWithXfyunAst(pcm: Buffer): Promise<AstResult> {
     let settled = false;
     let finalText = '';
     let sessionId: string = uuid;
-    let ws: WebSocket;
+    let ws: UndiciWebSocket;
 
     // Tracked so a bare close (code 1006 carries no reason) can still say
     // *where* it died: a handshake the server rejected at the HTTP level
@@ -233,7 +244,7 @@ export async function transcribeWithXfyunAst(pcm: Buffer): Promise<AstResult> {
     };
 
     try {
-      ws = new WebSocket(`${AST_HOST}?${query}`);
+      ws = new UndiciWebSocket(`${AST_HOST}?${query}`, { dispatcher: ast_agent });
     } catch (err) {
       finish({
         error: "We couldn't reach the transcription service.",
