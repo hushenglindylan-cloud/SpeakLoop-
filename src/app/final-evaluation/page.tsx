@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import { StepIndicator } from '@/components/step-indicator';
 import { getAllTranscripts, getAllPracticeTranscripts, getSession } from '@/lib/store/interview-session';
@@ -94,7 +94,16 @@ export default function FinalEvaluationPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
+  // One fetch per visit: each call runs two full evaluations plus a summary,
+  // so a duplicate (React's dev StrictMode remounts effects) both doubles the
+  // LLM cost and lets the second result overwrite the first with different
+  // numbers for the same answers.
+  const hasRequestedRef = useRef(false);
+
   useEffect(() => {
+    if (hasRequestedRef.current) return;
+    hasRequestedRef.current = true;
+
     async function fetchFinalEvaluation() {
       const interviewTranscripts = getAllTranscripts();
       const practiceTranscripts = getAllPracticeTranscripts();
@@ -314,7 +323,15 @@ function AnswerComparison() {
   const [improvements, setImprovements] = useState<string[]>([]);
   const [status, setStatus] = useState<'idle' | 'loading' | 'done' | 'error'>('idle');
 
+  // Same single-flight guard as the page above. Cancelling on cleanup instead
+  // would misfire under StrictMode: the remount's cleanup discards the only
+  // in-flight response while the guard stops a replacement from being sent.
+  const hasRequestedRef = useRef(false);
+
   useEffect(() => {
+    if (hasRequestedRef.current) return;
+    hasRequestedRef.current = true;
+
     const interviewTranscripts = getAllTranscripts();
     const practiceTranscripts = getAllPracticeTranscripts();
 
@@ -323,7 +340,6 @@ function AnswerComparison() {
       return;
     }
 
-    let cancelled = false;
     setStatus('loading');
 
     fetch('/api/analyze-progress', {
@@ -333,7 +349,6 @@ function AnswerComparison() {
     })
       .then((res) => res.json())
       .then((data) => {
-        if (cancelled) return;
         if (Array.isArray(data?.improvements)) {
           setImprovements(data.improvements);
           setStatus('done');
@@ -343,12 +358,8 @@ function AnswerComparison() {
       })
       .catch((err) => {
         console.error('Failed to analyze progress:', err);
-        if (!cancelled) setStatus('error');
+        setStatus('error');
       });
-
-    return () => {
-      cancelled = true;
-    };
   }, []);
 
   if (status === 'idle' || status === 'loading') {

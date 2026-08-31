@@ -164,11 +164,14 @@ export async function POST(request: NextRequest) {
     const transcripts: TranscriptEntry[] = Array.isArray(body?.transcripts) ? body.transcripts : [];
     const examiner = body?.examiner;
 
+    // Failures never carry a `scores` object — that's what tells the client
+    // this is an error rather than an evaluation. Zeroed scores used to be
+    // sent here, which reads as a real band 0 result to any caller that only
+    // checks whether scores are present.
     if (transcripts.length === 0) {
       return NextResponse.json({
         error: 'No transcripts provided',
-        scores: { fluencyCoherence: 0, lexicalResource: 0, grammaticalRange: 0, pronunciation: 0 },
-        overallBand: 0,
+        stage: 'no-transcripts',
       });
     }
 
@@ -202,12 +205,16 @@ export async function POST(request: NextRequest) {
       const isTimeout = llmError instanceof Error && llmError.name === 'AbortError';
       console.error(`qwen3.5-flash evaluation ${isTimeout ? 'timed out' : 'error'}:`, llmError);
 
-      // Return mock on LLM failure rather than crashing the page
-      const mock = buildMockEvaluation(transcripts);
+      // A key is configured, so the student expects a real band score. Falling
+      // back to the mock here would hand them plausible-looking fabricated
+      // bands (PRD §9: mock scores must never enter the production path), so
+      // report the failure instead and let the page offer a retry.
       return NextResponse.json({
-        ...mock,
-        fallback: true,
-        fallbackStage: isTimeout ? 'llm-timeout' : 'llm-error',
+        error: isTimeout
+          ? 'Evaluation timed out. Please try again.'
+          : 'AI evaluation failed. Please try again.',
+        stage: isTimeout ? 'llm-timeout' : 'llm-error',
+        detail: llmError instanceof Error ? llmError.message : String(llmError),
       });
     }
 
@@ -218,13 +225,11 @@ export async function POST(request: NextRequest) {
       const objectMatch = stripped.match(/\{[\s\S]*\}/);
       const jsonStr = objectMatch ? objectMatch[0] : stripped;
       evaluation = JSON.parse(jsonStr);
-    } catch (parseError) {
+    } catch {
       console.error('Failed to parse evaluation response:', content.slice(0, 500));
-      const mock = buildMockEvaluation(transcripts);
       return NextResponse.json({
-        ...mock,
-        fallback: true,
-        fallbackStage: 'parse-error',
+        error: 'AI evaluation returned an unreadable response. Please try again.',
+        stage: 'parse-error',
       });
     }
 
@@ -232,11 +237,9 @@ export async function POST(request: NextRequest) {
     const scores = evaluation.scores as Record<string, number> | undefined;
     if (!scores || typeof scores.fluencyCoherence !== 'number') {
       console.error('Evaluation response missing scores:', JSON.stringify(evaluation).slice(0, 300));
-      const mock = buildMockEvaluation(transcripts);
       return NextResponse.json({
-        ...mock,
-        fallback: true,
-        fallbackStage: 'invalid-response',
+        error: 'AI evaluation returned an incomplete result. Please try again.',
+        stage: 'invalid-response',
       });
     }
 
@@ -244,9 +247,9 @@ export async function POST(request: NextRequest) {
   } catch (error) {
     console.error('Evaluate interview error:', error);
     return NextResponse.json({
-      error: error instanceof Error ? error.message : String(error),
-      scores: { fluencyCoherence: 0, lexicalResource: 0, grammaticalRange: 0, pronunciation: 0 },
-      overallBand: 0,
+      error: 'Evaluation failed. Please try again.',
+      stage: 'unhandled-exception',
+      detail: error instanceof Error ? error.message : String(error),
     });
   }
 }

@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { StepIndicator } from '@/components/step-indicator';
@@ -185,67 +185,89 @@ function LoadingState() {
 export default function EvaluationPage() {
   const router = useRouter();
   const transcripts = getAllTranscripts();
-  const session = getSession();
 
   const [evaluation, setEvaluation] = useState<EvaluationData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-    async function fetchEvaluation() {
-      if (transcripts.length === 0) {
-        setLoading(false);
-        return;
-      }
+  // Scoring the same interview twice is never right: it burns a second LLM
+  // call and, because whichever response lands last wins, the student sees
+  // their band score visibly change for no reason. hasRequestedRef keeps the
+  // page to a single evaluation (React's dev StrictMode deliberately mounts
+  // effects twice, which is exactly how the duplicate used to slip through),
+  // and fetchSeqRef makes a superseded response — e.g. a slow first attempt
+  // arriving after a retry — get dropped instead of overwriting the newer one.
+  const hasRequestedRef = useRef(false);
+  const fetchSeqRef = useRef(0);
 
-      try {
-        // Get examiner context from session
-        const examinerContext = session?.examinerId
-          ? examiners.find((e) => e.id === session.examinerId)
-          : undefined;
+  const runEvaluation = useCallback(async () => {
+    const currentTranscripts = getAllTranscripts();
+    const currentSession = getSession();
 
-        const response = await fetch('/api/evaluate-interview', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            transcripts,
-            examiner: examinerContext
-              ? {
-                  name: examinerContext.name,
-                  personality: examinerContext.personality,
-                  difficulty: examinerContext.difficulty,
-                }
-              : undefined,
-          }),
-        });
-
-        const data = await response.json();
-
-        if (data.error && !data.scores?.fluencyCoherence) {
-          setError(data.error);
-        } else {
-          setEvaluation(data);
-          // Save evaluation data for the practice page to use
-          try {
-            localStorage.setItem('speakloop_last_evaluation', JSON.stringify({
-              weakness: data.mainWeakness,
-              improvementFocus: data.improvementFocus,
-              criteriaScores: data.scores,
-            }));
-          } catch {
-            // localStorage may not be available
-          }
-        }
-      } catch (err) {
-        console.error('Failed to fetch evaluation:', err);
-        setError('Failed to load evaluation. Please try again.');
-      } finally {
-        setLoading(false);
-      }
+    if (currentTranscripts.length === 0) {
+      setLoading(false);
+      return;
     }
 
-    fetchEvaluation();
-  }, [transcripts, session]);
+    const seq = ++fetchSeqRef.current;
+    setLoading(true);
+    setError(null);
+
+    try {
+      // Get examiner context from session
+      const examinerContext = currentSession?.examinerId
+        ? examiners.find((e) => e.id === currentSession.examinerId)
+        : undefined;
+
+      const response = await fetch('/api/evaluate-interview', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          transcripts: currentTranscripts,
+          examiner: examinerContext
+            ? {
+                name: examinerContext.name,
+                personality: examinerContext.personality,
+                difficulty: examinerContext.difficulty,
+              }
+            : undefined,
+        }),
+      });
+
+      const data = await response.json();
+      if (fetchSeqRef.current !== seq) return;
+
+      // The API only returns scores when it actually produced an evaluation;
+      // a failure comes back as { error, stage } with no scores at all.
+      if (!data?.scores || typeof data.scores.fluencyCoherence !== 'number') {
+        setError(data?.error || 'Evaluation failed. Please try again.');
+      } else {
+        setEvaluation(data);
+        // Save evaluation data for the practice page to use
+        try {
+          localStorage.setItem('speakloop_last_evaluation', JSON.stringify({
+            weakness: data.mainWeakness,
+            improvementFocus: data.improvementFocus,
+            criteriaScores: data.scores,
+          }));
+        } catch {
+          // localStorage may not be available
+        }
+      }
+    } catch (err) {
+      console.error('Failed to fetch evaluation:', err);
+      if (fetchSeqRef.current !== seq) return;
+      setError('Failed to load evaluation. Please try again.');
+    } finally {
+      if (fetchSeqRef.current === seq) setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (hasRequestedRef.current) return;
+    hasRequestedRef.current = true;
+    runEvaluation();
+  }, [runEvaluation]);
 
   if (loading) {
     return (
@@ -289,12 +311,29 @@ export default function EvaluationPage() {
           <p className="text-slate-500 mb-6">
             {error || 'No recordings available. Please complete the interview first.'}
           </p>
-          <Link
-            href="/interview"
-            className="inline-flex rounded-xl bg-[#DA291C] px-8 py-3 text-base font-semibold text-white transition-all hover:bg-[#B91C1C]"
-          >
-            Go to Interview
-          </Link>
+          {/* A scoring failure doesn't lose the answers — they're still in the
+              session, so offer a retry rather than sending the student back to
+              redo the whole interview. */}
+          {error && transcripts.length > 0 ? (
+            <div className="flex flex-col items-center gap-3">
+              <button
+                onClick={runEvaluation}
+                className="inline-flex rounded-xl bg-[#DA291C] px-8 py-3 text-base font-semibold text-white transition-all hover:bg-[#B91C1C]"
+              >
+                Retry Evaluation
+              </button>
+              <Link href="/interview" className="text-sm font-medium text-slate-500 hover:text-slate-700">
+                Or start a new interview
+              </Link>
+            </div>
+          ) : (
+            <Link
+              href="/interview"
+              className="inline-flex rounded-xl bg-[#DA291C] px-8 py-3 text-base font-semibold text-white transition-all hover:bg-[#B91C1C]"
+            >
+              Go to Interview
+            </Link>
+          )}
         </main>
       </div>
     );
