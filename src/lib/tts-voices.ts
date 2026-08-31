@@ -14,25 +14,29 @@
  * filters through `isExaminerSupported()`. Restoring an accent is therefore a
  * one-line change here — no examiner data has to be recreated.
  *
- * ⚠️ FILL IN THE VOICE IDS BELOW from the Model Studio voice list. They are
- * deliberately blank rather than guessed: a plausible-but-wrong id fails at
- * request time and is harder to spot than an obviously missing one.
+ * WHY ONLY AMERICAN
+ * -----------------
+ * Every voice in the qwen3-tts-flash catalogue lists English among its
+ * supported languages, but that only means it can pronounce English words —
+ * the voice's own character still comes through. `Ethan`, for instance, is
+ * "标准普通话，带部分北方口音": his English carries a Chinese accent, which is
+ * the last thing an IELTS candidate should be practising against. Only two
+ * voices in that catalogue are described as native English:
+ *   Jennifer — "品牌级、电影质感般美语女声"  (American English, female)
+ *   Aiden    — "精通厨艺的美语大男孩"        (American English, male)
+ * There is no British, Australian or Indian English voice, so those examiners
+ * are not offered rather than being given an American voice.
  *
  * ⚠️ VOICES ARE NOT PORTABLE BETWEEN MODEL FAMILIES. Model Studio rejects a
- * voice that belongs to a different family with InvalidParameter, and the two
- * families are also served from different endpoints with different request
- * shapes. Whatever goes in the map below must belong to the family that
- * `synthesizeSpeech()` in lib/ai/provider.ts actually calls (currently
- * Qwen-TTS / qwen3-tts-flash).
+ * voice from another family with InvalidParameter, and the families are served
+ * from different endpoints with different request shapes. Anything added below
+ * must belong to the family `synthesizeSpeech()` calls (Qwen-TTS).
  *
- * Confirmed English voices in the OTHER family, Qwen-Audio-TTS
- * (`qwen-audio-3.0-tts-flash`) — usable only if the provider is switched to
- * that family's endpoint, which is Beijing-only and needs a WorkspaceId:
- *   loongmary      — British English, female  ("温暖英音")
- *   loongeva_v3.6  — American English, female ("高智美音")
- *   loongjohn      — American English, male   ("沉稳亲切美音")
- * That family therefore covers British female and American male/female, but
- * has no British male, Australian or Indian English voice.
+ * If British examiners matter enough later, the Qwen-Audio-TTS family has
+ * `loongmary` ("温暖英音", British female) alongside `loongeva_v3.6` and
+ * `loongjohn` (American female/male). Switching to it means a different
+ * endpoint, a WorkspaceId, and Beijing-only availability — and it still has no
+ * British male, Australian or Indian voice.
  *
  * This module is imported by client components, so it must not depend on
  * server-only configuration — the overrides use the NEXT_PUBLIC_ prefix, which
@@ -53,8 +57,12 @@ function key(nationality: string, gender: string): string {
  * and those examiners immediately become selectable and speak with it.
  */
 const VOICE_MAP: Record<string, string | undefined> = {
-  [key('American', 'Male')]: process.env.NEXT_PUBLIC_TTS_VOICE_AMERICAN_MALE,
-  [key('American', 'Female')]: process.env.NEXT_PUBLIC_TTS_VOICE_AMERICAN_FEMALE,
+  // The only two native-English voices in the qwen3-tts-flash catalogue.
+  [key('American', 'Male')]: process.env.NEXT_PUBLIC_TTS_VOICE_AMERICAN_MALE || 'Aiden',
+  [key('American', 'Female')]: process.env.NEXT_PUBLIC_TTS_VOICE_AMERICAN_FEMALE || 'Jennifer',
+
+  // No native voice exists for these accents, so their examiners are not
+  // offered. Setting one of these variables brings them straight back.
   [key('British', 'Male')]: process.env.NEXT_PUBLIC_TTS_VOICE_BRITISH_MALE,
   [key('British', 'Female')]: process.env.NEXT_PUBLIC_TTS_VOICE_BRITISH_FEMALE,
   [key('Australian', 'Male')]: process.env.NEXT_PUBLIC_TTS_VOICE_AUSTRALIAN_MALE,

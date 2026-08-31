@@ -11,12 +11,24 @@ import { isExaminerSupported } from '@/lib/tts-voices';
 
 type FilterKey = 'nationality' | 'gender' | 'personality' | 'difficulty';
 
-const filters: { key: FilterKey; label: string; options: string[] }[] = [
-  { key: 'nationality', label: 'Nationality', options: ['British', 'American', 'Australian', 'Indian'] },
-  { key: 'gender', label: 'Gender', options: ['Male', 'Female'] },
-  { key: 'personality', label: 'Personality', options: ['Strict', 'Friendly', 'Encouraging', 'Challenging'] },
-  { key: 'difficulty', label: 'Difficulty', options: ['Easy', 'Standard', 'Challenging'] },
-];
+// Only examiners with a voice are offered (see lib/tts-voices.ts), so the
+// filters are built from that set rather than from a fixed list — otherwise
+// the page would advertise, say, a Nationality: British filter that can only
+// ever return nothing.
+function buildFilters(available: readonly Examiner[]): { key: FilterKey; label: string; options: string[] }[] {
+  const optionsFor = (k: FilterKey, order: string[]) =>
+    order.filter((option) => available.some((e) => e[k] === option));
+
+  const all: { key: FilterKey; label: string; options: string[] }[] = [
+    { key: 'nationality', label: 'Nationality', options: optionsFor('nationality', ['British', 'American', 'Australian', 'Indian']) },
+    { key: 'gender', label: 'Gender', options: optionsFor('gender', ['Male', 'Female']) },
+    { key: 'personality', label: 'Personality', options: optionsFor('personality', ['Strict', 'Friendly', 'Encouraging', 'Challenging']) },
+    { key: 'difficulty', label: 'Difficulty', options: optionsFor('difficulty', ['Easy', 'Standard', 'Challenging']) },
+  ];
+  // A filter with a single option filters nothing — drop it rather than show
+  // a row the student can only toggle uselessly.
+  return all.filter((f) => f.options.length > 1);
+}
 
 const personalityColors: Record<string, string> = {
   Strict: 'bg-red-50 text-red-700 border-red-200',
@@ -46,6 +58,7 @@ export default function ExaminerPage() {
   // IELTS candidate hearing an American voice from a British examiner is worse
   // than not being offered the British examiner at all — see lib/tts-voices.ts.
   const selectable = examiners.filter(isExaminerSupported);
+  const filters = buildFilters(selectable);
 
   const filtered = selectable.filter((e) =>
     Object.entries(activeFilters).every(
