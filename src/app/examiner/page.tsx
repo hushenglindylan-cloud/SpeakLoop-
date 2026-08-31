@@ -6,6 +6,7 @@ import { useRouter } from 'next/navigation';
 import { examiners, type Examiner } from '@/lib/mock/data';
 import { StepIndicator } from '@/components/step-indicator';
 import { initSession } from '@/lib/store/interview-session';
+import { getExaminerPortrait } from '@/lib/examiner-portraits';
 
 type FilterKey = 'nationality' | 'gender' | 'personality' | 'difficulty';
 
@@ -68,7 +69,7 @@ export default function ExaminerPage() {
       setMicPermission('granted');
       
       // Initialize session
-      initSession(selected.id, selected.name);
+      initSession(selected.id, selected.name, selected.personality, selected.difficulty);
       
       // Navigate to interview
       router.push('/interview');
@@ -151,8 +152,12 @@ export default function ExaminerPage() {
               }`}
             >
               <div className="mb-4 flex items-center gap-4">
-                <div className="flex h-14 w-14 items-center justify-center rounded-full bg-gradient-to-br from-slate-100 to-slate-200 text-2xl">
-                  {examiner.gender === 'Female' ? '👩‍💼' : '👨‍💼'}
+                <div className="h-14 w-14 rounded-full overflow-hidden border-2 border-slate-100 flex-shrink-0">
+                  <img
+                    src={getExaminerPortrait(examiner.id)}
+                    alt={examiner.name}
+                    className="w-full h-full object-cover"
+                  />
                 </div>
                 <div>
                   <h3 className="font-semibold text-slate-900">

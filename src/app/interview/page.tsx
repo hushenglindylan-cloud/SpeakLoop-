@@ -4,28 +4,32 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { StepIndicator } from '@/components/step-indicator';
-import { addTranscript, updateTranscriptAnswer } from '@/lib/store/interview-session';
-import { blobToPcm16kMono } from '@/lib/audio/pcm';
+import { ExaminerAvatar } from '@/components/examiner-avatar';
+import { getExaminerPortrait } from '@/lib/examiner-portraits';
+import { addTranscript, updateTranscriptAnswer, getSession, addUsedQuestionIds } from '@/lib/store/interview-session';
+import { examiners } from '@/lib/mock/data';
 
-const mockQuestions = [
-  {
-    id: 1,
-    question: 'Some people believe that technology has made our lives more complex, not simpler. To what extent do you agree or disagree?',
-    followUp: 'Can you give a specific example of when technology actually simplified a task that was previously difficult?',
-  },
-  {
-    id: 2,
-    question: 'Do you think the government should invest more in space exploration, or should that money be spent on solving problems on Earth?',
-    followUp: 'What about the role of private companies in space exploration — do you think they should be involved?',
-  },
-  {
-    id: 3,
-    question: 'How has the way people communicate changed over the past few decades, and do you think these changes have been positive overall?',
-    followUp: 'Do you think face-to-face communication will become less important in the future?',
-  },
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
+
+interface InterviewQuestion {
+  questionId: string;
+  topic: string;
+  question: string;
+  originalPrompt: string;
+  questionType: string;
+  difficulty: string;
+}
+
+type Phase = 'loading' | 'examiner-intro' | 'question' | 'recording' | 'followup' | 'followup-recording' | 'finished';
+
+// Simple generic follow-ups (used as fallback when API is unavailable)
+const fallbackFollowUps = [
+  'Can you give a specific example to support your point?',
+  'What about the opposite perspective — do you see any merit in it?',
+  'How do you think this might change in the future?',
 ];
-
-type Phase = 'examiner-intro' | 'question' | 'recording' | 'followup' | 'followup-recording' | 'finished';
 
 // Simulate question audio playback (no actual audio, just a delay)
 function simulateQuestionAudio(onEnded: () => void) {
@@ -53,9 +57,7 @@ function pickSupportedMimeType(): string | undefined {
 
 // Map a MediaRecorder mimeType to a sensible filename + extension so the
 // backend receives a file whose name reflects how it was originally
-// encoded. Kept as a debugging aid — the uploaded bytes are converted to
-// raw PCM before sending, so the transcription service no longer infers
-// anything from this name.
+// encoded. Kept as a debugging aid.
 function filenameForMimeType(mimeType: string | undefined): string {
   if (!mimeType) return 'recording.webm';
   if (mimeType.includes('mp4')) return 'recording.mp4';
@@ -69,28 +71,14 @@ function filenameForMimeType(mimeType: string | undefined): string {
 // so a question is never silently dropped from the session.
 async function transcribeAudio(blob: Blob | null): Promise<string> {
   if (!blob || blob.size === 0) {
-    // The MediaRecorder produced zero bytes — this never reaches /api/stt at
-    // all, so it's unrelated to whether the iFlytek credentials are set.
-    // Tagged distinctly from the backend's own "couldn't detect voice"
-    // responses so the two failure points aren't confused while debugging.
     console.error('STT skipped: recorded blob is empty (client-side capture produced 0 bytes)');
     return '[No speech detected (client-empty-blob)]';
   }
   try {
-    // iFlytek's real-time transcription needs raw 16 kHz mono PCM, and the
-    // server has no ffmpeg — so the conversion happens here, where the same
-    // browser that recorded the audio can decode it. A failure here is
-    // reported distinctly rather than being mistaken for a backend problem.
-    let uploadBlob: Blob;
-    try {
-      uploadBlob = await blobToPcm16kMono(blob);
-    } catch (conversionError) {
-      console.error('Audio conversion to PCM failed:', conversionError);
-      return '[Transcription error: could not convert the recording for upload (client-audio-conversion)]';
-    }
-
+    // Qwen3-ASR-Flash accepts audio in any common format (webm, mp4, ogg, wav).
+    // No PCM conversion needed — send the raw recording directly.
     const formData = new FormData();
-    formData.append('audio', uploadBlob, filenameForMimeType(blob.type));
+    formData.append('audio', blob, filenameForMimeType(blob.type));
     const res = await fetch('/api/stt', { method: 'POST', body: formData });
     const data = await res.json();
 
@@ -101,14 +89,10 @@ async function transcribeAudio(blob: Blob | null): Promise<string> {
     // /api/stt always answers 200 with either a transcript or an `error`
     // field (see route.ts) — specifically so a hosting platform's gateway
     // can't quietly replace a non-2xx response body before it reaches us.
-    // So `data.error` is the real signal here, not res.status; a non-OK or
-    // genuinely empty response means something outside our own code
-    // intervened (check the browser Network tab for the raw response).
     console.error('STT request failed:', res.status, data);
     const stageSuffix = data?.stage ? ` (${data.stage})` : '';
-    const detailSuffix = data?.providerDetail ? ` — ${data.providerDetail}` : '';
-    const rawSuffix = data?.raw ? ` [raw: ${data.raw}]` : '';
-    return `[Transcription error: ${data?.error || (res.ok ? 'empty response from server' : `HTTP ${res.status}`)}${stageSuffix}${detailSuffix}${rawSuffix}]`;
+    const detailSuffix = data?.detail ? ` — ${data.detail}` : '';
+    return `[Transcription error: ${data?.error || (res.ok ? 'empty response from server' : `HTTP ${res.status}`)}${stageSuffix}${detailSuffix}]`;
   } catch (err) {
     console.error('STT request failed:', err);
     return '[Transcription failed — please check your connection]';
@@ -117,15 +101,24 @@ async function transcribeAudio(blob: Blob | null): Promise<string> {
 
 export default function InterviewPage() {
   const router = useRouter();
-  const [phase, setPhase] = useState<Phase>('examiner-intro');
+  const [phase, setPhase] = useState<Phase>('loading');
+  const [questions, setQuestions] = useState<InterviewQuestion[]>([]);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [examinerPortrait, setExaminerPortrait] = useState<string>('');
+  const [examinerName, setExaminerName] = useState<string>('');
   const [currentQ, setCurrentQ] = useState(0);
   const [isRecording, setIsRecording] = useState(false);
-  // Guards only the brief moment the MediaRecorder is being stopped and
-  // collected (well under a second) — not the STT call itself, which now
-  // runs in the background so it never blocks the conversation.
   const [isStopping, setIsStopping] = useState(false);
-  // Only used once, if needed, when leaving for /evaluation — see
-  // handleGoToEvaluation.
+  // True from the moment "Finish Answer" is clicked until the next question/
+  // follow-up phase is actually on screen. isStopping alone isn't enough to
+  // guard against a double click: it flips back to false as soon as the
+  // MediaRecorder stops, but transcription + follow-up generation can still
+  // take many seconds afterward, during which the button would otherwise be
+  // re-enabled and a second click would submit the same answer twice.
+  // isProcessingAnswerRef is the actual (synchronous) re-entry guard;
+  // isProcessingAnswer just mirrors it for rendering.
+  const isProcessingAnswerRef = useRef(false);
+  const [isProcessingAnswer, setIsProcessingAnswer] = useState(false);
   const [isFinalizing, setIsFinalizing] = useState(false);
   const [showQuestion, setShowQuestion] = useState(false);
   const [elapsed, setElapsed] = useState(0);
@@ -134,9 +127,58 @@ export default function InterviewPage() {
   const mediaStreamRef = useRef<MediaStream | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
   const recordedMimeTypeRef = useRef<string | undefined>(undefined);
-  // Background transcription promises in flight — awaited only once, right
-  // before leaving for /evaluation, so every answer has real text by then.
   const pendingTranscriptionsRef = useRef<Promise<void>[]>([]);
+  const [followUpText, setFollowUpText] = useState<string>('');
+
+  // Fetch questions from RAG + LLM on mount
+  useEffect(() => {
+    async function loadQuestions() {
+      const session = getSession();
+      if (!session) {
+        setLoadError('No session found. Please select an examiner first.');
+        setPhase('examiner-intro');
+        return;
+      }
+
+      const examiner = examiners.find((e) => e.id === session.examinerId);
+      if (examiner) {
+        setExaminerPortrait(getExaminerPortrait(examiner.id));
+        setExaminerName(examiner.name);
+      }
+      const excludeIds: string[] = [];
+
+      try {
+        const res = await fetch('/api/interview-questions', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            examiner: examiner
+              ? { personality: examiner.personality, difficulty: examiner.difficulty }
+              : { personality: 'Friendly', difficulty: 'Standard' },
+            excludeQuestionIds: excludeIds,
+          }),
+        });
+
+        const data = await res.json();
+
+        if (data.error || !data.questions || data.questions.length === 0) {
+          setLoadError(data.error || 'Failed to load questions.');
+          setPhase('examiner-intro');
+          return;
+        }
+
+        setQuestions(data.questions);
+        addUsedQuestionIds(data.questions.map((q: InterviewQuestion) => q.questionId));
+        setPhase('examiner-intro');
+      } catch (err) {
+        console.error('Failed to load interview questions:', err);
+        setLoadError('Failed to connect to the server. Please try again.');
+        setPhase('examiner-intro');
+      }
+    }
+
+    loadQuestions();
+  }, []);
 
   // Timer for recording
   useEffect(() => {
@@ -213,6 +255,8 @@ export default function InterviewPage() {
 
   // Play question audio and start recording after it ends
   const playQuestionAndRecord = useCallback(() => {
+    isProcessingAnswerRef.current = false;
+    setIsProcessingAnswer(false);
     setPhase('question');
     simulateQuestionAudio(() => {
       setTimeout(() => {
@@ -224,6 +268,8 @@ export default function InterviewPage() {
 
   // Play follow-up audio and start recording after it ends
   const playFollowUpAndRecord = useCallback(() => {
+    isProcessingAnswerRef.current = false;
+    setIsProcessingAnswer(false);
     setPhase('followup');
     simulateQuestionAudio(() => {
       setTimeout(() => {
@@ -233,48 +279,108 @@ export default function InterviewPage() {
     });
   }, [startRecording]);
 
-  // Stop recording and move on immediately — transcription happens in the
-  // background so it never stalls the conversation. A placeholder is saved
-  // at the question's correct index right away; transcribeAudio patches in
-  // the real text (or an error placeholder) whenever it resolves, however
-  // long that takes and regardless of what order answers finish in.
+  // Stop recording and move on — for main answers, we wait for transcription
+  // then call /api/follow-up to generate a contextual follow-up question.
   const stopRecordingAndSave = useCallback(async (isFollowUp: boolean) => {
-    if (isStopping) return;
+    // isProcessingAnswerRef (not React state) is the real guard: it's read
+    // and written synchronously, so a second click that lands before the
+    // next render can't slip through the way a state-based check could.
+    if (isProcessingAnswerRef.current || isStopping || questions.length === 0) return;
+    isProcessingAnswerRef.current = true;
+    setIsProcessingAnswer(true);
     setIsStopping(true);
     setIsRecording(false);
     setShowQuestion(false);
 
-    const audioBlob = await stopAndCollectAudio();
-    setElapsed(0);
-    setIsStopping(false);
+    // Releases the re-entry lock. Called on every exit path below, including
+    // unexpected errors, so a failure never leaves the button permanently
+    // disabled. playQuestionAndRecord/playFollowUpAndRecord also clear it
+    // themselves for the normal-completion paths — calling it again here is
+    // a harmless no-op in that case.
+    const releaseLock = () => {
+      isProcessingAnswerRef.current = false;
+      setIsProcessingAnswer(false);
+    };
 
-    const index = addTranscript({
-      question: isFollowUp ? mockQuestions[currentQ].followUp : mockQuestions[currentQ].question,
-      questionType: isFollowUp ? 'followup' : 'main',
-      answer: '',
-    });
-    pendingTranscriptionsRef.current.push(
-      transcribeAudio(audioBlob).then((transcript) => {
-        updateTranscriptAnswer(index, transcript);
-      })
-    );
+    try {
+      const audioBlob = await stopAndCollectAudio();
+      setElapsed(0);
+      setIsStopping(false);
 
-    // Move to next phase
-    if (isFollowUp) {
-      if (currentQ < mockQuestions.length - 1) {
-        setCurrentQ((prev) => prev + 1);
-        setTimeout(() => {
-          playQuestionAndRecord();
-        }, 300);
+      const currentQuestion = questions[currentQ];
+
+      if (isFollowUp) {
+        // Follow-up answer: save and move to next question or finish
+        const index = addTranscript({
+          question: followUpText || fallbackFollowUps[currentQ % fallbackFollowUps.length],
+          questionType: 'followup',
+          answer: '',
+        });
+        pendingTranscriptionsRef.current.push(
+          transcribeAudio(audioBlob).then((transcript) => {
+            updateTranscriptAnswer(index, transcript);
+          })
+        );
+
+        if (currentQ < questions.length - 1) {
+          setCurrentQ((prev) => prev + 1);
+          setTimeout(() => {
+            playQuestionAndRecord();
+          }, 300);
+        } else {
+          releaseLock();
+          setPhase('finished');
+        }
       } else {
-        setPhase('finished');
+        // Main answer: transcribe first, then generate follow-up
+        const index = addTranscript({
+          question: currentQuestion.question,
+          questionType: 'main',
+          answer: '',
+        });
+
+        // Wait for transcription to complete so we can use it for follow-up
+        const transcript = await transcribeAudio(audioBlob);
+        updateTranscriptAnswer(index, transcript);
+
+        // Generate contextual follow-up
+        let followUp = fallbackFollowUps[currentQ % fallbackFollowUps.length];
+        try {
+          const session = getSession();
+          const examiner = examiners.find((e) => e.id === session?.examinerId);
+          const res = await fetch('/api/follow-up', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              mainQuestion: currentQuestion.question,
+              answer: transcript,
+              topic: currentQuestion.topic,
+              examinerPersonality: examiner?.personality,
+            }),
+          });
+          if (res.ok) {
+            const data = await res.json();
+            if (data.followUp) {
+              followUp = data.followUp;
+            }
+          }
+        } catch (err) {
+          console.error('Follow-up generation failed, using fallback:', err);
+        }
+
+        setFollowUpText(followUp);
+        setTimeout(() => {
+          playFollowUpAndRecord();
+        }, 300);
       }
-    } else {
-      setTimeout(() => {
-        playFollowUpAndRecord();
-      }, 300);
+    } catch (err) {
+      // Unexpected failure somewhere in the stop/transcribe/follow-up chain —
+      // release the lock so the student isn't stuck with a dead button.
+      console.error('stopRecordingAndSave failed:', err);
+      setIsStopping(false);
+      releaseLock();
     }
-  }, [currentQ, isStopping, playQuestionAndRecord, playFollowUpAndRecord, stopAndCollectAudio]);
+  }, [currentQ, isStopping, questions, followUpText, playQuestionAndRecord, playFollowUpAndRecord, stopAndCollectAudio]);
 
   const handleStartQuestion = () => {
     playQuestionAndRecord();
@@ -318,6 +424,36 @@ export default function InterviewPage() {
       </header>
 
       <main className="max-w-4xl mx-auto px-6 py-6">
+        {/* Loading State */}
+        {phase === 'loading' && (
+          <div className="flex items-center justify-center py-20">
+            <div className="text-center">
+              <div className="w-12 h-12 border-4 border-slate-200 border-t-[#DA291C] rounded-full animate-spin mx-auto mb-4" />
+              <p className="text-slate-500 text-sm">Preparing your interview questions...</p>
+            </div>
+          </div>
+        )}
+
+        {/* Error State */}
+        {loadError && phase !== 'loading' && (
+          <div className="flex items-center justify-center py-20">
+            <div className="text-center max-w-md">
+              <div className="w-12 h-12 rounded-full bg-red-100 flex items-center justify-center mx-auto mb-4">
+                <svg className="w-6 h-6 text-red-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z" />
+                </svg>
+              </div>
+              <p className="text-slate-700 font-medium mb-2">{loadError}</p>
+              <Link href="/examiner" className="text-[#DA291C] text-sm font-medium hover:underline">
+                ← Back to examiner selection
+              </Link>
+            </div>
+          </div>
+        )}
+
+        {/* Interview UI — only show when not loading and no error */}
+        {phase !== 'loading' && !loadError && (
+          <>
         {/* Status Bar */}
         <div className="flex items-center justify-between mb-4">
           <div className="flex items-center gap-3">
@@ -340,17 +476,12 @@ export default function InterviewPage() {
 
         {/* Examiner Video Area */}
         <div className="relative w-full aspect-video bg-slate-900 rounded-2xl overflow-hidden shadow-lg">
-          {/* Examiner Avatar Placeholder */}
-          <div className="absolute inset-0 flex items-center justify-center">
-            <div className="text-center">
-              <div className="w-24 h-24 rounded-full bg-gradient-to-br from-slate-700 to-slate-800 mx-auto mb-3 flex items-center justify-center">
-                <svg className="w-12 h-12 text-slate-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M15.75 6a3.75 3.75 0 11-7.5 0 3.75 3.75 0 017.5 0zM4.501 20.118a7.5 7.5 0 0114.998 0A17.933 17.933 0 0112 21.75c-2.676 0-5.216-.584-7.499-1.632z" />
-                </svg>
-              </div>
-              <p className="text-slate-400 text-sm">AI Examiner</p>
-            </div>
-          </div>
+          {/* Examiner Avatar — fills entire video area */}
+          <ExaminerAvatar
+            src={examinerPortrait}
+            name={examinerName}
+            phase={phase}
+          />
 
           {/* Recording Indicator Overlay */}
           {isRecording && (
@@ -360,17 +491,17 @@ export default function InterviewPage() {
             </div>
           )}
 
-          {/* Question Phase Overlay */}
+          {/* Question Phase Overlay — subtle, portrait still visible */}
           {(phase === 'question' || phase === 'followup') && (
-            <div className="absolute inset-0 bg-black/40 flex items-center justify-center">
+            <div className="absolute inset-0 bg-black/20 flex items-center justify-center pointer-events-none">
               <div className="text-center">
-                <div className="w-16 h-16 rounded-full bg-white/20 flex items-center justify-center mx-auto mb-4">
-                  <svg className="w-8 h-8 text-white animate-pulse" fill="currentColor" viewBox="0 0 24 24">
+                <div className="w-14 h-14 rounded-full bg-white/15 backdrop-blur-sm flex items-center justify-center mx-auto mb-3">
+                  <svg className="w-7 h-7 text-white animate-pulse" fill="currentColor" viewBox="0 0 24 24">
                     <path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3z"/>
                     <path d="M17 11c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92V21h2v-3.08c3.39-.49 6-3.39 6-6.92h-2z"/>
                   </svg>
                 </div>
-                <p className="text-white text-lg font-medium">Examiner is speaking...</p>
+                <p className="text-white/90 text-base font-medium drop-shadow">Examiner is speaking...</p>
               </div>
             </div>
           )}
@@ -410,8 +541,8 @@ export default function InterviewPage() {
                 </p>
                 <p className="text-slate-700 text-base leading-relaxed">
                   {phase === 'recording'
-                    ? mockQuestions[currentQ].question
-                    : mockQuestions[currentQ].followUp}
+                    ? questions[currentQ]?.question
+                    : followUpText || fallbackFollowUps[currentQ % fallbackFollowUps.length]}
                 </p>
               </div>
             )}
@@ -420,7 +551,7 @@ export default function InterviewPage() {
 
         {/* Progress Indicator */}
         <div className="mt-6 flex items-center justify-center gap-2">
-          {mockQuestions.map((_, index) => (
+          {questions.map((_, index) => (
             <div
               key={index}
               className={`h-1.5 rounded-full transition-all ${
@@ -434,8 +565,10 @@ export default function InterviewPage() {
           ))}
         </div>
         <p className="text-center text-sm text-slate-400 mt-2">
-          Question {currentQ + 1} of {mockQuestions.length}
+          Question {currentQ + 1} of {questions.length}
         </p>
+          </>
+        )}
       </main>
 
       {/* Sticky action bar — always reachable without scrolling, regardless of video height */}
@@ -453,10 +586,10 @@ export default function InterviewPage() {
           {(phase === 'recording' || phase === 'followup-recording') && (
             <button
               onClick={phase === 'recording' ? handleFinishMainAnswer : handleFinishFollowUp}
-              disabled={isStopping}
+              disabled={isStopping || isProcessingAnswer}
               className="w-full py-3.5 bg-slate-800 text-white rounded-xl font-medium hover:bg-slate-700 transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
             >
-              Finish Answer
+              {isProcessingAnswer ? 'Processing your answer…' : 'Finish Answer'}
             </button>
           )}
 

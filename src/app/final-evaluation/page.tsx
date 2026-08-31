@@ -2,9 +2,9 @@
 
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
-import { mockBeforeScores, mockAfterScores } from '@/lib/mock/data';
 import { StepIndicator } from '@/components/step-indicator';
-import { getAllTranscripts, getAllPracticeTranscripts } from '@/lib/store/interview-session';
+import { getAllTranscripts, getAllPracticeTranscripts, getSession } from '@/lib/store/interview-session';
+import { examiners } from '@/lib/mock/data';
 
 function AnimatedNumber({ target, duration = 1500 }: { target: number; duration?: number }) {
   const [value, setValue] = useState(0);
@@ -69,16 +69,125 @@ function ScoreRow({ label, before, after }: ScoreRowProps) {
   );
 }
 
+interface EvaluationData {
+  before: {
+    fluencyCoherence: number;
+    lexicalResource: number;
+    grammaticalRangeAccuracy: number;
+    pronunciation: number;
+    overallBand: number;
+  };
+  after: {
+    fluencyCoherence: number;
+    lexicalResource: number;
+    grammaticalRangeAccuracy: number;
+    pronunciation: number;
+    overallBand: number;
+  };
+  summary?: string;
+  mock?: boolean;
+  error?: string;
+}
+
 export default function FinalEvaluationPage() {
+  const [data, setData] = useState<EvaluationData | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    async function fetchFinalEvaluation() {
+      const interviewTranscripts = getAllTranscripts();
+      const practiceTranscripts = getAllPracticeTranscripts();
+
+      if (interviewTranscripts.length === 0 || practiceTranscripts.length === 0) {
+        setError('No transcripts found. Please complete both interview and practice sessions.');
+        setLoading(false);
+        return;
+      }
+
+      const session = getSession();
+      const examiner = session?.examinerId
+        ? examiners.find((e) => e.id === session.examinerId)
+        : undefined;
+
+      try {
+        const res = await fetch('/api/final-evaluation', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            interviewTranscripts,
+            practiceTranscripts,
+            examiner: examiner
+              ? { name: examiner.name, personality: examiner.personality, difficulty: examiner.difficulty }
+              : undefined,
+          }),
+        });
+
+        const result = await res.json();
+
+        if (result.error && !result.before) {
+          setError(result.error);
+        } else {
+          setData(result);
+        }
+      } catch (err) {
+        console.error('Failed to fetch final evaluation:', err);
+        setError('Failed to load final evaluation. Please try again.');
+      } finally {
+        setLoading(false);
+      }
+    }
+
+    fetchFinalEvaluation();
+  }, []);
+
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-[#fafaf9]">
+        <header className="border-b border-slate-100 bg-white/80 backdrop-blur-sm">
+          <div className="mx-auto flex h-16 max-w-6xl items-center justify-between px-6">
+            <Link href="/" className="text-lg font-semibold text-slate-500">SpeakLoop</Link>
+            <StepIndicator />
+          </div>
+        </header>
+        <main className="mx-auto max-w-4xl px-6 py-12">
+          <div className="text-center py-20">
+            <div className="w-12 h-12 border-4 border-slate-200 border-t-[#DA291C] rounded-full animate-spin mx-auto mb-4" />
+            <p className="text-slate-500 text-sm">Evaluating your progress...</p>
+          </div>
+        </main>
+      </div>
+    );
+  }
+
+  if (error || !data) {
+    return (
+      <div className="min-h-screen bg-[#fafaf9]">
+        <header className="border-b border-slate-100 bg-white/80 backdrop-blur-sm">
+          <div className="mx-auto flex h-16 max-w-6xl items-center justify-between px-6">
+            <Link href="/" className="text-lg font-semibold text-slate-500">SpeakLoop</Link>
+            <StepIndicator />
+          </div>
+        </header>
+        <main className="mx-auto max-w-4xl px-6 py-12">
+          <div className="text-center py-20">
+            <p className="text-slate-700 font-medium mb-4">{error || 'Failed to load evaluation'}</p>
+            <Link href="/" className="text-[#DA291C] text-sm font-medium hover:underline">← Back to home</Link>
+          </div>
+        </main>
+      </div>
+    );
+  }
+
   const rows: ScoreRowProps[] = [
-    { label: 'Fluency & Coherence', before: mockBeforeScores.fluencyCoherence, after: mockAfterScores.fluencyCoherence },
-    { label: 'Lexical Resource', before: mockBeforeScores.lexicalResource, after: mockAfterScores.lexicalResource },
-    { label: 'Grammatical Range & Accuracy', before: mockBeforeScores.grammaticalRange, after: mockAfterScores.grammaticalRange },
-    { label: 'Pronunciation', before: mockBeforeScores.pronunciation, after: mockAfterScores.pronunciation },
+    { label: 'Fluency & Coherence', before: data.before.fluencyCoherence, after: data.after.fluencyCoherence },
+    { label: 'Lexical Resource', before: data.before.lexicalResource, after: data.after.lexicalResource },
+    { label: 'Grammatical Range & Accuracy', before: data.before.grammaticalRangeAccuracy, after: data.after.grammaticalRangeAccuracy },
+    { label: 'Pronunciation', before: data.before.pronunciation, after: data.after.pronunciation },
   ];
 
-  const overallBefore = mockBeforeScores.overallBand;
-  const overallAfter = mockAfterScores.overallBand;
+  const overallBefore = data.before.overallBand;
+  const overallAfter = data.after.overallBand;
   const overallImprovement = overallAfter - overallBefore;
 
   return (
@@ -131,7 +240,7 @@ export default function FinalEvaluationPage() {
                 </svg>
               </div>
               <div className="rounded-full bg-emerald-50 px-4 py-1.5 text-sm font-bold text-emerald-700">
-                +{overallImprovement.toFixed(1)} Band Improvement
+                {overallImprovement >= 0 ? '+' : ''}{overallImprovement.toFixed(1)} Band {overallImprovement >= 0 ? 'Improvement' : 'Change'}
               </div>
             </div>
 
@@ -159,6 +268,24 @@ export default function FinalEvaluationPage() {
             ))}
           </div>
         </div>
+
+        {/* AI Summary */}
+        {data.summary && (
+          <div className="mb-10 rounded-2xl border border-slate-200 bg-white p-8">
+            <h2 className="mb-4 flex items-center gap-2 text-lg font-semibold text-slate-900">
+              <svg className="h-5 w-5 text-[#DA291C]" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M7 8h10M7 12h4m1 8l-4-4H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-3l-4 4z" />
+              </svg>
+              Examiner&apos;s Summary
+            </h2>
+            <p className="text-slate-600 leading-relaxed">{data.summary}</p>
+            {data.mock && (
+              <p className="mt-3 text-xs text-amber-600">
+                This is a mock evaluation. Connect DASHSCOPE_API_KEY for real AI assessment.
+              </p>
+            )}
+          </div>
+        )}
 
         {/* Interview vs Practice Comparison */}
         <AnswerComparison />
