@@ -10,8 +10,12 @@ export interface TranscriptEntry {
 export interface InterviewSession {
   examinerId: string;
   examinerName: string;
+  personality: string;
+  difficulty: string;
   transcripts: TranscriptEntry[];
   practiceTranscripts: TranscriptEntry[];
+  /** Question bank IDs already asked in this interview — used so Practice can avoid repeats */
+  usedQuestionIds: string[];
 }
 
 const STORAGE_KEY = 'speakloop_interview_session';
@@ -25,6 +29,15 @@ function loadSession(): InterviewSession | null {
       // Ensure practiceTranscripts exists for backward compatibility
       if (!parsed.practiceTranscripts) {
         parsed.practiceTranscripts = [];
+      }
+      if (!parsed.personality) {
+        parsed.personality = 'Friendly';
+      }
+      if (!parsed.difficulty) {
+        parsed.difficulty = 'Standard';
+      }
+      if (!parsed.usedQuestionIds) {
+        parsed.usedQuestionIds = [];
       }
       return parsed;
     }
@@ -49,18 +62,34 @@ function saveSession(session: InterviewSession | null) {
 
 let session: InterviewSession | null = loadSession();
 
-export function initSession(examinerId: string, examinerName: string) {
+export function initSession(examinerId: string, examinerName: string, personality: string = 'Friendly', difficulty: string = 'Standard') {
   session = {
     examinerId,
     examinerName,
+    personality,
+    difficulty,
     transcripts: [],
     practiceTranscripts: [],
+    usedQuestionIds: [],
   };
   saveSession(session);
 }
 
 export function getSession(): InterviewSession | null {
   return session;
+}
+
+// Records the RAG question bank IDs asked during the interview so Practice
+// can exclude them and avoid handing the student the exact same questions.
+export function addUsedQuestionIds(ids: string[]) {
+  if (session) {
+    session.usedQuestionIds.push(...ids);
+    saveSession(session);
+  }
+}
+
+export function getUsedQuestionIds(): string[] {
+  return session?.usedQuestionIds ?? [];
 }
 
 // Returns the index the entry was stored at, so a caller that doesn't have

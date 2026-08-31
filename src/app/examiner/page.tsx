@@ -6,15 +6,26 @@ import { useRouter } from 'next/navigation';
 import { examiners, type Examiner } from '@/lib/mock/data';
 import { StepIndicator } from '@/components/step-indicator';
 import { initSession } from '@/lib/store/interview-session';
+import { getExaminerPortrait } from '@/lib/examiner-portraits';
+import { isExaminerSupported } from '@/lib/tts-voices';
 
-type FilterKey = 'nationality' | 'gender' | 'personality' | 'difficulty';
+type FilterKey = 'gender' | 'personality' | 'difficulty';
 
-const filters: { key: FilterKey; label: string; options: string[] }[] = [
-  { key: 'nationality', label: 'Nationality', options: ['British', 'American', 'Australian', 'Indian'] },
-  { key: 'gender', label: 'Gender', options: ['Male', 'Female'] },
-  { key: 'personality', label: 'Personality', options: ['Strict', 'Friendly', 'Encouraging', 'Challenging'] },
-  { key: 'difficulty', label: 'Difficulty', options: ['Easy', 'Standard', 'Challenging'] },
-];
+// Filters are built from the examiners actually on offer rather than from a
+// fixed list, so the page can never advertise a filter that returns nothing.
+function buildFilters(available: readonly Examiner[]): { key: FilterKey; label: string; options: string[] }[] {
+  const optionsFor = (k: FilterKey, order: string[]) =>
+    order.filter((option) => available.some((e) => e[k] === option));
+
+  const all: { key: FilterKey; label: string; options: string[] }[] = [
+    { key: 'gender', label: 'Gender', options: optionsFor('gender', ['Male', 'Female']) },
+    { key: 'personality', label: 'Personality', options: optionsFor('personality', ['Strict', 'Friendly', 'Encouraging', 'Challenging']) },
+    { key: 'difficulty', label: 'Difficulty', options: optionsFor('difficulty', ['Easy', 'Standard', 'Challenging']) },
+  ];
+  // A filter with a single option filters nothing — drop it rather than show
+  // a row the student can only toggle uselessly.
+  return all.filter((f) => f.options.length > 1);
+}
 
 const personalityColors: Record<string, string> = {
   Strict: 'bg-red-50 text-red-700 border-red-200',
@@ -23,24 +34,21 @@ const personalityColors: Record<string, string> = {
   Challenging: 'bg-purple-50 text-purple-700 border-purple-200',
 };
 
-const nationalityFlags: Record<string, string> = {
-  British: '🇬🇧',
-  American: '🇺🇸',
-  Australian: '🇦🇺',
-  Indian: '🇮🇳',
-};
-
 export default function ExaminerPage() {
   const router = useRouter();
   const [selected, setSelected] = useState<Examiner | null>(null);
   const [activeFilters, setActiveFilters] = useState<Record<FilterKey, string | null>>({
-    nationality: null,
     gender: null,
     personality: null,
     difficulty: null,
   });
 
-  const filtered = examiners.filter((e) =>
+  // An examiner is only offered if there is a voice for them to speak with —
+  // see lib/tts-voices.ts for why the roster is American-only.
+  const selectable = examiners.filter(isExaminerSupported);
+  const filters = buildFilters(selectable);
+
+  const filtered = selectable.filter((e) =>
     Object.entries(activeFilters).every(
       ([key, val]) => val === null || e[key as FilterKey] === val
     )
@@ -68,7 +76,7 @@ export default function ExaminerPage() {
       setMicPermission('granted');
       
       // Initialize session
-      initSession(selected.id, selected.name);
+      initSession(selected.id, selected.name, selected.personality, selected.difficulty);
       
       // Navigate to interview
       router.push('/interview');
@@ -124,7 +132,6 @@ export default function ExaminerPage() {
                         : 'border-slate-200 bg-white text-slate-600 hover:border-slate-300 hover:bg-slate-50'
                     }`}
                   >
-                    {filter.key === 'nationality' && nationalityFlags[option]}{' '}
                     {option}
                   </button>
                 ))}
@@ -151,15 +158,19 @@ export default function ExaminerPage() {
               }`}
             >
               <div className="mb-4 flex items-center gap-4">
-                <div className="flex h-14 w-14 items-center justify-center rounded-full bg-gradient-to-br from-slate-100 to-slate-200 text-2xl">
-                  {examiner.gender === 'Female' ? '👩‍💼' : '👨‍💼'}
+                <div className="h-14 w-14 rounded-full overflow-hidden border-2 border-slate-100 flex-shrink-0">
+                  <img
+                    src={getExaminerPortrait(examiner.id)}
+                    alt={examiner.name}
+                    className="w-full h-full object-cover"
+                  />
                 </div>
                 <div>
                   <h3 className="font-semibold text-slate-900">
                     {examiner.name}
                   </h3>
                   <div className="flex items-center gap-2 text-xs text-slate-400">
-                    <span>{nationalityFlags[examiner.nationality]} {examiner.nationality}</span>
+                    <span>{examiner.gender}</span>
                     <span>·</span>
                     <span>{examiner.ethnicity}</span>
                   </div>

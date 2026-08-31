@@ -1,7 +1,6 @@
 export interface Examiner {
   id: string;
   name: string;
-  nationality: 'British' | 'American' | 'Australian' | 'Indian';
   gender: 'Male' | 'Female';
   ethnicity: 'White' | 'Asian' | 'Black';
   personality: 'Strict' | 'Friendly' | 'Encouraging' | 'Challenging';
@@ -33,71 +32,32 @@ export interface PracticeQuestion {
   contextHint: string;
 }
 
-// Helper: each (nationality, gender) combo has 6 examiners covering all 4 personalities + 3 difficulties
+// Only American examiners are offered: the TTS catalogue has no native
+// British, Australian or Indian English voice (see lib/tts-voices.ts), and an
+// examiner whose accent contradicts their persona is worse than one fewer
+// choice. Nationality is therefore no longer a field — every examiner here is
+// American, so storing it would say nothing.
+//
+// What still varies is what actually drives the interview: personality shapes
+// the examiner's tone and how they probe, difficulty shapes question
+// complexity. All four personalities and all three difficulty levels are
+// covered across the twelve.
 export const examiners: Examiner[] = [
-  // ===== British - Male (6) =====
-  { id: 'B-M-1', name: 'Dr. James Whitfield', nationality: 'British', gender: 'Male', ethnicity: 'White', personality: 'Strict', difficulty: 'Easy', bio: 'Retired Oxford don. Patient with beginners but expects clear structure.' },
-  { id: 'B-M-2', name: 'Mr. Oliver Clarke', nationality: 'British', gender: 'Male', ethnicity: 'White', personality: 'Friendly', difficulty: 'Standard', bio: 'London-based examiner. Warm conversational style, 10 years experience.' },
-  { id: 'B-M-3', name: 'Dr. Wei Huang', nationality: 'British', gender: 'Male', ethnicity: 'Asian', personality: 'Encouraging', difficulty: 'Challenging', bio: 'Cambridge-educated. Understands ESL challenges firsthand, pushes for excellence.' },
-  { id: 'B-M-4', name: 'Mr. Marcus Bennett', nationality: 'British', gender: 'Male', ethnicity: 'Black', personality: 'Challenging', difficulty: 'Standard', bio: 'Birmingham examiner. Loves intellectual debate and abstract topics.' },
-  { id: 'B-M-5', name: 'Dr. Raj Kapoor', nationality: 'British', gender: 'Male', ethnicity: 'Asian', personality: 'Friendly', difficulty: 'Easy', bio: 'Manchester-based. Creates relaxed atmosphere, helps nervous candidates.' },
-  { id: 'B-M-6', name: 'Mr. Thomas Greene', nationality: 'British', gender: 'Male', ethnicity: 'White', personality: 'Strict', difficulty: 'Challenging', bio: 'Cambridge examiner. Demands academic precision and complex structures.' },
+  // ===== Male (6) =====
+  { id: 'A-M-1', name: 'Dr. Michael Torres', gender: 'Male', ethnicity: 'White', personality: 'Friendly', difficulty: 'Easy', bio: 'California-based. Relaxed style, helps candidates feel comfortable.' },
+  { id: 'A-M-2', name: 'Mr. David Washington', gender: 'Male', ethnicity: 'Black', personality: 'Challenging', difficulty: 'Challenging', bio: 'Chicago educator. Dynamic style, tests depth of argumentation.' },
+  { id: 'A-M-3', name: 'Dr. Kevin Chen', gender: 'Male', ethnicity: 'Asian', personality: 'Encouraging', difficulty: 'Standard', bio: 'MIT graduate. Combines technical precision with motivational coaching.' },
+  { id: 'A-M-4', name: 'Mr. Robert Hayes', gender: 'Male', ethnicity: 'White', personality: 'Strict', difficulty: 'Standard', bio: 'DC examiner. Clear expectations, focuses on grammatical accuracy.' },
+  { id: 'A-M-5', name: 'Dr. Jamal Williams', gender: 'Male', ethnicity: 'Black', personality: 'Encouraging', difficulty: 'Easy', bio: 'Atlanta-based. Warm personality, builds candidate confidence naturally.' },
+  { id: 'A-M-6', name: 'Mr. Jason Park', gender: 'Male', ethnicity: 'Asian', personality: 'Strict', difficulty: 'Challenging', bio: 'NYC examiner. Demands high-level vocabulary and complex grammar.' },
 
-  // ===== British - Female (6) =====
-  { id: 'B-F-1', name: 'Dr. Elizabeth Hart', nationality: 'British', gender: 'Female', ethnicity: 'White', personality: 'Encouraging', difficulty: 'Standard', bio: '15 years IELTS experience. Creates safe space for candidates to excel.' },
-  { id: 'B-F-2', name: 'Ms. Sarah Mitchell', nationality: 'British', gender: 'Female', ethnicity: 'White', personality: 'Strict', difficulty: 'Challenging', bio: 'Oxford examiner. Rigorous standards with detailed constructive feedback.' },
-  { id: 'B-F-3', name: 'Dr. Mei Lin', nationality: 'British', gender: 'Female', ethnicity: 'Asian', personality: 'Friendly', difficulty: 'Easy', bio: 'Born in London to Chinese parents. Understands cultural nuances in communication.' },
-  { id: 'B-F-4', name: 'Ms. Amara Osei', nationality: 'British', gender: 'Female', ethnicity: 'Black', personality: 'Challenging', difficulty: 'Standard', bio: 'Edinburgh examiner. Pushes candidates to think critically and deeply.' },
-  { id: 'B-F-5', name: 'Dr. Priya Sharma', nationality: 'British', gender: 'Female', ethnicity: 'Asian', personality: 'Encouraging', difficulty: 'Challenging', bio: 'Bristol-based. Supportive yet demanding, focuses on extended responses.' },
-  { id: 'B-F-6', name: 'Ms. Charlotte Webb', nationality: 'British', gender: 'Female', ethnicity: 'White', personality: 'Friendly', difficulty: 'Standard', bio: 'Leeds examiner. Natural conversational flow, genuine interest in views.' },
-
-  // ===== American - Male (6) =====
-  { id: 'A-M-1', name: 'Dr. Michael Torres', nationality: 'American', gender: 'Male', ethnicity: 'White', personality: 'Friendly', difficulty: 'Easy', bio: 'California-based. Relaxed style, helps candidates feel comfortable.' },
-  { id: 'A-M-2', name: 'Mr. David Washington', nationality: 'American', gender: 'Male', ethnicity: 'Black', personality: 'Challenging', difficulty: 'Challenging', bio: 'Chicago educator. Dynamic style, tests depth of argumentation.' },
-  { id: 'A-M-3', name: 'Dr. Kevin Chen', nationality: 'American', gender: 'Male', ethnicity: 'Asian', personality: 'Encouraging', difficulty: 'Standard', bio: 'MIT graduate. Combines technical precision with motivational coaching.' },
-  { id: 'A-M-4', name: 'Mr. Robert Hayes', nationality: 'American', gender: 'Male', ethnicity: 'White', personality: 'Strict', difficulty: 'Standard', bio: 'DC examiner. Clear expectations, focuses on grammatical accuracy.' },
-  { id: 'A-M-5', name: 'Dr. Jamal Williams', nationality: 'American', gender: 'Male', ethnicity: 'Black', personality: 'Encouraging', difficulty: 'Easy', bio: 'Atlanta-based. Warm personality, builds candidate confidence naturally.' },
-  { id: 'A-M-6', name: 'Mr. Jason Park', nationality: 'American', gender: 'Male', ethnicity: 'Asian', personality: 'Strict', difficulty: 'Challenging', bio: 'NYC examiner. Demands high-level vocabulary and complex grammar.' },
-
-  // ===== American - Female (6) =====
-  { id: 'A-F-1', name: 'Dr. Jennifer Adams', nationality: 'American', gender: 'Female', ethnicity: 'White', personality: 'Friendly', difficulty: 'Standard', bio: 'Texas-based. Warm personality, natural conversational flow.' },
-  { id: 'A-F-2', name: 'Ms. Keisha Brown', nationality: 'American', gender: 'Female', ethnicity: 'Black', personality: 'Challenging', difficulty: 'Challenging', bio: 'LA examiner. Challenges assumptions while maintaining supportive tone.' },
-  { id: 'A-F-3', name: 'Dr. Lisa Wang', nationality: 'American', gender: 'Female', ethnicity: 'Asian', personality: 'Strict', difficulty: 'Standard', bio: 'Seattle-based. Focuses on coherence and logical argumentation.' },
-  { id: 'A-F-4', name: 'Ms. Olivia Martin', nationality: 'American', gender: 'Female', ethnicity: 'White', personality: 'Encouraging', difficulty: 'Easy', bio: 'Boston examiner. Motivational approach, builds candidate confidence.' },
-  { id: 'A-F-5', name: 'Dr. Aisha Johnson', nationality: 'American', gender: 'Female', ethnicity: 'Black', personality: 'Friendly', difficulty: 'Easy', bio: 'Miami-based. Creates comfortable environment, helps candidates relax.' },
-  { id: 'A-F-6', name: 'Ms. Susan Kim', nationality: 'American', gender: 'Female', ethnicity: 'Asian', personality: 'Challenging', difficulty: 'Challenging', bio: 'San Francisco examiner. Tests limits with abstract and societal topics.' },
-
-  // ===== Australian - Male (6) =====
-  { id: 'AU-M-1', name: 'Dr. William O\'Brien', nationality: 'Australian', gender: 'Male', ethnicity: 'White', personality: 'Encouraging', difficulty: 'Standard', bio: 'Melbourne examiner. Known for patience and constructive guidance.' },
-  { id: 'AU-M-2', name: 'Mr. Daniel Wilson', nationality: 'Australian', gender: 'Male', ethnicity: 'White', personality: 'Strict', difficulty: 'Challenging', bio: 'Brisbane-based. Clear expectations, focuses on fluency and coherence.' },
-  { id: 'AU-M-3', name: 'Dr. Minh Nguyen', nationality: 'Australian', gender: 'Male', ethnicity: 'Asian', personality: 'Challenging', difficulty: 'Standard', bio: 'Sydney-based. Loves intellectual debate and complex topic exploration.' },
-  { id: 'AU-M-4', name: 'Mr. Jack Thompson', nationality: 'Australian', gender: 'Male', ethnicity: 'White', personality: 'Friendly', difficulty: 'Easy', bio: 'Perth examiner. Approachable style, helps candidates feel at ease.' },
-  { id: 'AU-M-5', name: 'Dr. Arjun Patel', nationality: 'Australian', gender: 'Male', ethnicity: 'Asian', personality: 'Friendly', difficulty: 'Standard', bio: 'Adelaide-based. Warm manner, specializes in building candidate confidence.' },
-  { id: 'AU-M-6', name: 'Mr. Ryan Cooper', nationality: 'Australian', gender: 'Male', ethnicity: 'White', personality: 'Encouraging', difficulty: 'Challenging', bio: 'Hobart examiner. Encourages extended responses with detailed feedback.' },
-
-  // ===== Australian - Female (6) =====
-  { id: 'AU-F-1', name: 'Ms. Emma Thompson', nationality: 'Australian', gender: 'Female', ethnicity: 'White', personality: 'Friendly', difficulty: 'Standard', bio: 'Sydney examiner. Approachable style, helps candidates relax and perform.' },
-  { id: 'AU-F-2', name: 'Dr. Charlotte Brown', nationality: 'Australian', gender: 'Female', ethnicity: 'White', personality: 'Strict', difficulty: 'Challenging', bio: 'Melbourne-based. High standards with focus on lexical precision.' },
-  { id: 'AU-F-3', name: 'Dr. Lan Hoang', nationality: 'Australian', gender: 'Female', ethnicity: 'Asian', personality: 'Encouraging', difficulty: 'Easy', bio: 'Perth-based. Patient approach, focuses on building confidence step by step.' },
-  { id: 'AU-F-4', name: 'Ms. Sophie Davis', nationality: 'Australian', gender: 'Female', ethnicity: 'White', personality: 'Challenging', difficulty: 'Standard', bio: 'Brisbane examiner. Tests critical thinking with thoughtful follow-ups.' },
-  { id: 'AU-F-5', name: 'Ms. Priya Nair', nationality: 'Australian', gender: 'Female', ethnicity: 'Asian', personality: 'Strict', difficulty: 'Easy', bio: 'Canberra-based. Clear structure expectations, supportive feedback style.' },
-  { id: 'AU-F-6', name: 'Dr. Olivia Kelly', nationality: 'Australian', gender: 'Female', ethnicity: 'White', personality: 'Encouraging', difficulty: 'Challenging', bio: 'Adelaide examiner. Encourages risk-taking with language while maintaining standards.' },
-
-  // ===== Indian - Male (6) =====
-  { id: 'I-M-1', name: 'Dr. Rajesh Kumar', nationality: 'Indian', gender: 'Male', ethnicity: 'Asian', personality: 'Strict', difficulty: 'Challenging', bio: 'Former Delhi University professor. Rigorous standards, pushes candidates to excel.' },
-  { id: 'I-M-2', name: 'Mr. Arjun Singh', nationality: 'Indian', gender: 'Male', ethnicity: 'Asian', personality: 'Friendly', difficulty: 'Standard', bio: 'Mumbai-based examiner. Warm personality, creates comfortable test environment.' },
-  { id: 'I-M-3', name: 'Dr. Vikram Patel', nationality: 'Indian', gender: 'Male', ethnicity: 'Asian', personality: 'Encouraging', difficulty: 'Easy', bio: 'Bangalore examiner. Patient and supportive, helps candidates express ideas clearly.' },
-  { id: 'I-M-4', name: 'Mr. Sanjay Gupta', nationality: 'Indian', gender: 'Male', ethnicity: 'Asian', personality: 'Challenging', difficulty: 'Standard', bio: 'Chennai-based. Challenges candidates with complex societal and philosophical topics.' },
-  { id: 'I-M-5', name: 'Dr. Amit Sharma', nationality: 'Indian', gender: 'Male', ethnicity: 'Asian', personality: 'Friendly', difficulty: 'Easy', bio: 'Pune examiner. Known for putting nervous candidates at ease quickly.' },
-  { id: 'I-M-6', name: 'Mr. Rohan Desai', nationality: 'Indian', gender: 'Male', ethnicity: 'Asian', personality: 'Strict', difficulty: 'Standard', bio: 'Kolkata-based. Focuses on precision in grammar and lexical resource.' },
-
-  // ===== Indian - Female (6) =====
-  { id: 'I-F-1', name: 'Dr. Fatima Ali', nationality: 'Indian', gender: 'Female', ethnicity: 'Asian', personality: 'Strict', difficulty: 'Challenging', bio: 'Delhi examiner. Strict but fair, demands high standards with detailed feedback.' },
-  { id: 'I-F-2', name: 'Ms. Sunita Sharma', nationality: 'Indian', gender: 'Female', ethnicity: 'Asian', personality: 'Encouraging', difficulty: 'Standard', bio: 'Mumbai-based. Supportive examiner, focuses on helping candidates shine.' },
-  { id: 'I-F-3', name: 'Dr. Priya Nair', nationality: 'Indian', gender: 'Female', ethnicity: 'Asian', personality: 'Friendly', difficulty: 'Easy', bio: 'Bangalore examiner. Approachable manner, helps candidates relax naturally.' },
-  { id: 'I-F-4', name: 'Ms. Ananya Das', nationality: 'Indian', gender: 'Female', ethnicity: 'Asian', personality: 'Challenging', difficulty: 'Challenging', bio: 'Hyderabad-based. Pushes candidates beyond comfort zones for real growth.' },
-  { id: 'I-F-5', name: 'Dr. Kavita Reddy', nationality: 'Indian', gender: 'Female', ethnicity: 'Asian', personality: 'Encouraging', difficulty: 'Easy', bio: 'Chennai examiner. Motivational style, builds confidence through positive reinforcement.' },
-  { id: 'I-F-6', name: 'Ms. Meera Joshi', nationality: 'Indian', gender: 'Female', ethnicity: 'Asian', personality: 'Friendly', difficulty: 'Standard', bio: 'Pune-based. Natural conversationalist, genuinely interested in candidate perspectives.' },
+  // ===== Female (6) =====
+  { id: 'A-F-1', name: 'Dr. Jennifer Adams', gender: 'Female', ethnicity: 'White', personality: 'Friendly', difficulty: 'Standard', bio: 'Texas-based. Warm personality, natural conversational flow.' },
+  { id: 'A-F-2', name: 'Ms. Keisha Brown', gender: 'Female', ethnicity: 'Black', personality: 'Challenging', difficulty: 'Challenging', bio: 'LA examiner. Challenges assumptions while maintaining supportive tone.' },
+  { id: 'A-F-3', name: 'Dr. Lisa Wang', gender: 'Female', ethnicity: 'Asian', personality: 'Strict', difficulty: 'Standard', bio: 'Seattle-based. Focuses on coherence and logical argumentation.' },
+  { id: 'A-F-4', name: 'Ms. Olivia Martin', gender: 'Female', ethnicity: 'White', personality: 'Encouraging', difficulty: 'Easy', bio: 'Boston examiner. Motivational approach, builds candidate confidence.' },
+  { id: 'A-F-5', name: 'Dr. Aisha Johnson', gender: 'Female', ethnicity: 'Black', personality: 'Friendly', difficulty: 'Easy', bio: 'Miami-based. Creates comfortable environment, helps candidates relax.' },
+  { id: 'A-F-6', name: 'Ms. Susan Kim', gender: 'Female', ethnicity: 'Asian', personality: 'Challenging', difficulty: 'Challenging', bio: 'San Francisco examiner. Tests limits with abstract and societal topics.' },
 ];
 
 export const mockEvaluation: EvaluationDetail = {

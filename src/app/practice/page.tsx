@@ -3,12 +3,30 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { mockPracticeQuestions } from '@/lib/mock/data';
 import { StepIndicator } from '@/components/step-indicator';
-import { addPracticeTranscript, updatePracticeTranscriptAnswer } from '@/lib/store/interview-session';
-import { blobToPcm16kMono } from '@/lib/audio/pcm';
+import { ExaminerAvatar } from '@/components/examiner-avatar';
+import { getExaminerPortrait } from '@/lib/examiner-portraits';
+import { addPracticeTranscript, updatePracticeTranscriptAnswer, getSession, getUsedQuestionIds } from '@/lib/store/interview-session';
+import { examiners } from '@/lib/mock/data';
 
-type Phase = 'intro' | 'question' | 'recording' | 'followup' | 'followup-recording' | 'finished';
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
+
+interface PracticeQuestion {
+  questionId: string;
+  topic: string;
+  question: string;
+  followUp: string;
+  contextHint: string;
+}
+
+type Phase = 'loading' | 'intro' | 'question' | 'recording' | 'followup' | 'followup-recording' | 'finished';
+
+// Seconds the question stays on screen before recording starts. There is no
+// TTS yet (PRD §9), so the examiner asks in text and this is the student's
+// window to read it — not a stand-in for audio playback. They can skip it.
+const READING_SECONDS = 6;
 
 // Pick the best audio format the current browser actually supports for
 // MediaRecorder. Safari does not support webm at all (only mp4/aac), so we
@@ -29,9 +47,7 @@ function pickSupportedMimeType(): string | undefined {
 
 // Map a MediaRecorder mimeType to a sensible filename + extension so the
 // backend receives a file whose name reflects how it was originally
-// encoded. Kept as a debugging aid — the uploaded bytes are converted to
-// raw PCM before sending, so the transcription service no longer infers
-// anything from this name.
+// encoded. Kept as a debugging aid.
 function filenameForMimeType(mimeType: string | undefined): string {
   if (!mimeType) return 'recording.webm';
   if (mimeType.includes('mp4')) return 'recording.mp4';
@@ -47,28 +63,14 @@ function filenameForMimeType(mimeType: string | undefined): string {
 // comparison — it is not shown during the practice session itself.
 async function transcribeAudio(blob: Blob | null): Promise<string> {
   if (!blob || blob.size === 0) {
-    // The MediaRecorder produced zero bytes — this never reaches /api/stt at
-    // all, so it's unrelated to whether the iFlytek credentials are set.
-    // Tagged distinctly from the backend's own "couldn't detect voice"
-    // responses so the two failure points aren't confused while debugging.
     console.error('STT skipped: recorded blob is empty (client-side capture produced 0 bytes)');
     return '[No speech detected (client-empty-blob)]';
   }
   try {
-    // iFlytek's real-time transcription needs raw 16 kHz mono PCM, and the
-    // server has no ffmpeg — so the conversion happens here, where the same
-    // browser that recorded the audio can decode it. A failure here is
-    // reported distinctly rather than being mistaken for a backend problem.
-    let uploadBlob: Blob;
-    try {
-      uploadBlob = await blobToPcm16kMono(blob);
-    } catch (conversionError) {
-      console.error('Audio conversion to PCM failed:', conversionError);
-      return '[Transcription error: could not convert the recording for upload (client-audio-conversion)]';
-    }
-
+    // Qwen3-ASR-Flash accepts audio in any common format (webm, mp4, ogg, wav).
+    // No PCM conversion needed — send the raw recording directly.
     const formData = new FormData();
-    formData.append('audio', uploadBlob, filenameForMimeType(blob.type));
+    formData.append('audio', blob, filenameForMimeType(blob.type));
     const res = await fetch('/api/stt', { method: 'POST', body: formData });
     const data = await res.json();
 
@@ -79,14 +81,10 @@ async function transcribeAudio(blob: Blob | null): Promise<string> {
     // /api/stt always answers 200 with either a transcript or an `error`
     // field (see route.ts) — specifically so a hosting platform's gateway
     // can't quietly replace a non-2xx response body before it reaches us.
-    // So `data.error` is the real signal here, not res.status; a non-OK or
-    // genuinely empty response means something outside our own code
-    // intervened (check the browser Network tab for the raw response).
     console.error('STT request failed:', res.status, data);
     const stageSuffix = data?.stage ? ` (${data.stage})` : '';
-    const detailSuffix = data?.providerDetail ? ` — ${data.providerDetail}` : '';
-    const rawSuffix = data?.raw ? ` [raw: ${data.raw}]` : '';
-    return `[Transcription error: ${data?.error || (res.ok ? 'empty response from server' : `HTTP ${res.status}`)}${stageSuffix}${detailSuffix}${rawSuffix}]`;
+    const detailSuffix = data?.detail ? ` — ${data.detail}` : '';
+    return `[Transcription error: ${data?.error || (res.ok ? 'empty response from server' : `HTTP ${res.status}`)}${stageSuffix}${detailSuffix}]`;
   } catch (err) {
     console.error('STT request failed:', err);
     return '[Transcription failed — please check your connection]';
@@ -95,28 +93,89 @@ async function transcribeAudio(blob: Blob | null): Promise<string> {
 
 export default function PracticePage() {
   const router = useRouter();
-  const [phase, setPhase] = useState<Phase>('intro');
+  const [phase, setPhase] = useState<Phase>('loading');
+  const [questions, setQuestions] = useState<PracticeQuestion[]>([]);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [examinerPortrait, setExaminerPortrait] = useState<string>('');
+  const [examinerName, setExaminerName] = useState<string>('');
   const [currentQ, setCurrentQ] = useState(0);
   const [isRecording, setIsRecording] = useState(false);
-  // Guards only the brief moment the MediaRecorder is being stopped and
-  // collected (well under a second) — not the STT call itself, which now
-  // runs in the background so it never blocks the conversation.
   const [isStopping, setIsStopping] = useState(false);
-  // Only used once, if needed, when leaving for /final-evaluation.
   const [isFinalizing, setIsFinalizing] = useState(false);
-  const [showQuestion, setShowQuestion] = useState(false);
+  const [readCountdown, setReadCountdown] = useState(READING_SECONDS);
   const [elapsed, setElapsed] = useState(0);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
   const recordedMimeTypeRef = useRef<string | undefined>(undefined);
-  // Background transcription promises in flight — awaited only once, right
-  // before leaving for /final-evaluation, so every answer has real text by
-  // then (used there as evidence for the progress comparison).
   const pendingTranscriptionsRef = useRef<Promise<void>[]>([]);
 
-  const question = mockPracticeQuestions[currentQ];
+  const question = questions[currentQ];
+
+  // Fetch targeted practice questions based on evaluation results.
+  // Single-flight for the same reason as the interview page's loader.
+  const hasLoadedQuestionsRef = useRef(false);
+
+  useEffect(() => {
+    if (hasLoadedQuestionsRef.current) return;
+    hasLoadedQuestionsRef.current = true;
+
+    async function loadPracticeQuestions() {
+      const session = getSession();
+      if (!session) {
+        setLoadError('No session found. Please complete an interview first.');
+        return;
+      }
+
+      const examiner = examiners.find((e) => e.id === session.examinerId);
+      if (examiner) {
+        setExaminerPortrait(getExaminerPortrait(examiner.id));
+        setExaminerName(examiner.name);
+      }
+
+      try {
+        // Try to get evaluation data from localStorage (set by evaluation page)
+        let evaluationData: { weakness?: string; improvementFocus?: string; criteriaScores?: Record<string, { band: number }> } = {};
+        try {
+          const stored = localStorage.getItem('speakloop_last_evaluation');
+          if (stored) {
+            evaluationData = JSON.parse(stored);
+          }
+        } catch {
+          // No evaluation data available — practice without targeting
+        }
+
+        const res = await fetch('/api/practice-questions', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            weakness: evaluationData.weakness,
+            improvementFocus: evaluationData.improvementFocus,
+            criteriaScores: evaluationData.criteriaScores,
+            personality: examiner?.personality || session.personality || 'Friendly',
+            difficulty: examiner?.difficulty || session.difficulty || 'Standard',
+            excludeQuestionIds: getUsedQuestionIds(),
+          }),
+        });
+
+        const data = await res.json();
+
+        if (data.error || !data.questions || data.questions.length === 0) {
+          setLoadError(data.error || 'Failed to load practice questions.');
+          return;
+        }
+
+        setQuestions(data.questions);
+        setPhase('intro');
+      } catch (err) {
+        console.error('Failed to load practice questions:', err);
+        setLoadError('Failed to connect to the server. Please try again.');
+      }
+    }
+
+    loadPracticeQuestions();
+  }, []);
 
   useEffect(() => {
     if (isRecording) {
@@ -190,17 +249,34 @@ export default function PracticePage() {
     });
   }, []);
 
+  // Tick the reading countdown down while a question is on screen.
+  useEffect(() => {
+    if (phase !== 'question' && phase !== 'followup') return;
+    if (readCountdown <= 0) return;
+    const timer = setTimeout(() => setReadCountdown((c) => c - 1), 1000);
+    return () => clearTimeout(timer);
+  }, [phase, readCountdown]);
+
+  // Countdown finished (or was skipped) — open the microphone.
+  useEffect(() => {
+    if (readCountdown !== 0) return;
+    if (phase === 'question') {
+      startRecording();
+      setPhase('recording');
+    } else if (phase === 'followup') {
+      startRecording();
+      setPhase('followup-recording');
+    }
+  }, [readCountdown, phase, startRecording]);
+
   const handleStartPractice = async () => {
     // Request microphone permission up front (kept alive for the whole session)
     try {
       await navigator.mediaDevices.getUserMedia({ audio: true }).then((stream) => {
         stream.getTracks().forEach((track) => track.stop());
       });
+      setReadCountdown(READING_SECONDS);
       setPhase('question');
-      setTimeout(() => {
-        setPhase('recording');
-        startRecording();
-      }, 3000);
     } catch {
       alert('Microphone access is required for practice. Please allow microphone access and try again.');
     }
@@ -212,17 +288,18 @@ export default function PracticePage() {
   // placeholder is saved at the question's correct index right away;
   // transcribeAudio patches in the real text whenever it resolves.
   const finishAnswer = useCallback(async (isFollowUp: boolean) => {
-    if (isStopping) return;
+    if (isStopping || questions.length === 0) return;
     setIsStopping(true);
     setIsRecording(false);
-    setShowQuestion(false);
 
     const audioBlob = await stopAndCollectAudio();
     setElapsed(0);
     setIsStopping(false);
 
+    const currentQuestion = questions[currentQ];
+
     const index = addPracticeTranscript({
-      question: isFollowUp ? question.aiFollowUp : question.question,
+      question: isFollowUp ? currentQuestion.followUp : currentQuestion.question,
       questionType: isFollowUp ? 'followup' : 'main',
       answer: '',
     });
@@ -233,30 +310,25 @@ export default function PracticePage() {
     );
 
     if (isFollowUp) {
-      if (currentQ < mockPracticeQuestions.length - 1) {
+      if (currentQ < questions.length - 1) {
         setCurrentQ((prev) => prev + 1);
+        setReadCountdown(READING_SECONDS);
         setPhase('question');
-        setTimeout(() => {
-          setPhase('recording');
-          startRecording();
-        }, 3000);
       } else {
         setPhase('finished');
       }
     } else {
+      setReadCountdown(READING_SECONDS);
       setPhase('followup');
-      setTimeout(() => {
-        setPhase('followup-recording');
-        startRecording();
-      }, 3000);
     }
-  }, [currentQ, isStopping, question, startRecording, stopAndCollectAudio]);
+  }, [currentQ, isStopping, questions, stopAndCollectAudio]);
 
   const handleFinishMainAnswer = () => finishAnswer(false);
   const handleFinishFollowUp = () => finishAnswer(true);
 
-  const handleViewQuestion = () => {
-    setShowQuestion(true);
+  // Skip the remaining reading time and start answering now.
+  const handleStartAnswering = () => {
+    setReadCountdown(0);
   };
 
   // The only point in the flow where we wait on background transcription —
@@ -285,8 +357,35 @@ export default function PracticePage() {
       </header>
 
       <main className="max-w-4xl mx-auto px-6 py-6">
+        {/* Loading State */}
+        {phase === 'loading' && (
+          <div className="flex items-center justify-center py-20">
+            <div className="text-center">
+              <div className="w-12 h-12 border-4 border-slate-200 border-t-amber-500 rounded-full animate-spin mx-auto mb-4" />
+              <p className="text-slate-500 text-sm">Preparing targeted practice questions...</p>
+            </div>
+          </div>
+        )}
+
+        {/* Error State */}
+        {loadError && (
+          <div className="flex items-center justify-center py-20">
+            <div className="text-center max-w-md">
+              <div className="w-12 h-12 rounded-full bg-red-100 flex items-center justify-center mx-auto mb-4">
+                <svg className="w-6 h-6 text-red-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z" />
+                </svg>
+              </div>
+              <p className="text-slate-700 font-medium mb-2">{loadError}</p>
+              <Link href="/" className="text-[#DA291C] text-sm font-medium hover:underline">
+                ← Back to home
+              </Link>
+            </div>
+          </div>
+        )}
+
         {/* Intro Phase */}
-        {phase === 'intro' && (
+        {phase === 'intro' && question && (
           <div className="max-w-2xl mx-auto space-y-6">
             <div className="rounded-2xl border border-slate-100 bg-slate-50 p-8">
               <h2 className="mb-6 text-lg font-semibold text-slate-900">
@@ -317,9 +416,7 @@ export default function PracticePage() {
                       Focus Areas for This Round
                     </h3>
                     <p className="text-sm leading-relaxed text-slate-600">
-                      Based on your evaluation, focus on expanding your vocabulary
-                      for abstract topics. Practice giving extended answers with
-                      specific examples and clear reasoning.
+                      Based on your evaluation, focus on: {question.contextHint}
                     </p>
                   </div>
                 </div>
@@ -373,7 +470,7 @@ export default function PracticePage() {
                   </>
                 )}
                 {!isRecording && (phase === 'question' || phase === 'followup') && (
-                  <span className="text-sm text-slate-400">Examiner is speaking...</span>
+                  <span className="text-sm text-slate-400">Read the question…</span>
                 )}
               </div>
               {isRecording && (
@@ -385,17 +482,12 @@ export default function PracticePage() {
 
             {/* Examiner Video Area */}
             <div className="relative w-full aspect-video bg-slate-900 rounded-2xl overflow-hidden shadow-lg">
-              {/* Examiner Avatar Placeholder */}
-              <div className="absolute inset-0 flex items-center justify-center">
-                <div className="text-center">
-                  <div className="w-24 h-24 rounded-full bg-gradient-to-br from-slate-700 to-slate-800 mx-auto mb-3 flex items-center justify-center">
-                    <svg className="w-12 h-12 text-slate-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M15.75 6a3.75 3.75 0 11-7.5 0 3.75 3.75 0 017.5 0zM4.501 20.118a7.5 7.5 0 0114.998 0A17.933 17.933 0 0112 21.75c-2.676 0-5.216-.584-7.499-1.632z" />
-                    </svg>
-                  </div>
-                  <p className="text-slate-400 text-sm">AI Examiner</p>
-                </div>
-              </div>
+              {/* Examiner Avatar — fills entire video area */}
+              <ExaminerAvatar
+                src={examinerPortrait}
+                name={examinerName}
+                phase={phase}
+              />
 
               {/* Recording Indicator Overlay */}
               {isRecording && (
@@ -410,24 +502,29 @@ export default function PracticePage() {
                 <span className="text-xs font-medium text-amber-400">PRACTICE</span>
               </div>
 
-              {/* Question Phase Overlay */}
+              {/* Question phase — the question itself is the delivery
+                  mechanism, since there is no examiner audio to listen to. */}
               {(phase === 'question' || phase === 'followup') && (
-                <div className="absolute inset-0 bg-black/40 flex items-center justify-center">
-                  <div className="text-center">
-                    <div className="w-16 h-16 rounded-full bg-white/20 flex items-center justify-center mx-auto mb-4">
-                      <svg className="w-8 h-8 text-white animate-pulse" fill="currentColor" viewBox="0 0 24 24">
-                        <path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3z"/>
-                        <path d="M17 11c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92V21h2v-3.08c3.39-.49 6-3.39 6-6.92h-2z"/>
-                      </svg>
-                    </div>
-                    <p className="text-white text-lg font-medium">Examiner is speaking...</p>
+                <div className="absolute inset-0 bg-black/50 flex items-center justify-center p-6">
+                  <div className="max-w-2xl text-center">
+                    <p className="text-white/60 text-xs uppercase tracking-wide mb-3">
+                      {phase === 'question' ? `Question ${currentQ + 1}` : 'Follow-up'}
+                    </p>
+                    <p className="text-white text-lg sm:text-xl font-medium leading-relaxed drop-shadow">
+                      {phase === 'question' ? question.question : question.followUp}
+                    </p>
+                    <p className="text-white/70 text-sm mt-5">
+                      Recording starts in {readCountdown}s
+                    </p>
                   </div>
                 </div>
               )}
 
             </div>
 
-            {/* Focus hint + question text toggle — scrollable area, not the sticky bar */}
+            {/* The question stays on screen while answering — with no audio
+                there is nothing to "not catch", so hiding it behind a toggle
+                only made the student work to see what they were answering. */}
             {(phase === 'recording' || phase === 'followup-recording') && (
               <div className="mt-4 space-y-4">
                 {phase === 'recording' && (
@@ -438,33 +535,22 @@ export default function PracticePage() {
                   </div>
                 )}
 
-                {!showQuestion ? (
-                  <div className="bg-slate-50 rounded-xl p-4 text-center">
-                    <p className="text-slate-500 text-sm">
-                      Didn&apos;t catch that?{' '}
-                      <button onClick={handleViewQuestion} className="text-[#DA291C] font-medium hover:underline">
-                        View question text
-                      </button>
-                    </p>
-                  </div>
-                ) : (
-                  <div className="bg-slate-50 rounded-xl p-4">
-                    <p className="text-xs text-slate-400 uppercase tracking-wide mb-2">
-                      {phase === 'recording' ? 'Question' : 'Follow-up'}
-                    </p>
-                    <p className="text-slate-700 text-base leading-relaxed">
-                      {phase === 'recording'
-                        ? question.question
-                        : question.aiFollowUp}
-                    </p>
-                  </div>
-                )}
+                <div className="bg-slate-50 rounded-xl p-4">
+                  <p className="text-xs text-slate-400 uppercase tracking-wide mb-2">
+                    {phase === 'recording' ? 'Question' : 'Follow-up'}
+                  </p>
+                  <p className="text-slate-700 text-base leading-relaxed">
+                    {phase === 'recording'
+                      ? question.question
+                      : question.followUp}
+                  </p>
+                </div>
               </div>
             )}
 
             {/* Progress Indicator */}
             <div className="mt-6 flex items-center justify-center gap-2">
-              {mockPracticeQuestions.map((_, index) => (
+              {questions.map((_, index) => (
                 <div
                   key={index}
                   className={`h-1.5 rounded-full transition-all ${
@@ -478,23 +564,32 @@ export default function PracticePage() {
               ))}
             </div>
             <p className="text-center text-sm text-slate-400 mt-2">
-              Question {currentQ + 1} of {mockPracticeQuestions.length}
+              Question {currentQ + 1} of {questions.length}
             </p>
           </>
         )}
       </main>
 
       {/* Sticky action bar — mirrors the Interview page exactly */}
-      {(phase === 'recording' || phase === 'followup-recording') && (
+      {(phase === 'question' || phase === 'followup' || phase === 'recording' || phase === 'followup-recording') && (
         <div className="fixed bottom-0 inset-x-0 z-30 bg-white/95 backdrop-blur-sm border-t border-slate-100 shadow-[0_-4px_16px_rgba(0,0,0,0.06)]">
           <div className="max-w-4xl mx-auto px-6 py-4" style={{ paddingBottom: 'calc(1rem + env(safe-area-inset-bottom))' }}>
-            <button
-              onClick={phase === 'recording' ? handleFinishMainAnswer : handleFinishFollowUp}
-              disabled={isStopping}
-              className="w-full py-3.5 bg-slate-800 text-white rounded-xl font-medium hover:bg-slate-700 transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
-            >
-              Finish Answer
-            </button>
+            {phase === 'question' || phase === 'followup' ? (
+              <button
+                onClick={handleStartAnswering}
+                className="w-full py-3.5 bg-[#DA291C] text-white rounded-xl font-medium hover:bg-[#B91C1C] transition-colors"
+              >
+                Start Answering Now
+              </button>
+            ) : (
+              <button
+                onClick={phase === 'recording' ? handleFinishMainAnswer : handleFinishFollowUp}
+                disabled={isStopping}
+                className="w-full py-3.5 bg-slate-800 text-white rounded-xl font-medium hover:bg-slate-700 transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
+              >
+                Finish Answer
+              </button>
+            )}
           </div>
         </div>
       )}

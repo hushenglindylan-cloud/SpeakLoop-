@@ -1,31 +1,22 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { transcribeWithXfyunAst } from '@/lib/stt/xfyun-ast';
-
-const xfyunConfigured = () =>
-  Boolean(process.env.XFYUN_APP_ID && process.env.XFYUN_API_KEY && process.env.XFYUN_API_SECRET);
+import { transcribeAudio } from '@/lib/ai/provider';
 
 // Lets the deployed environment be checked from a browser/curl without
-// exposing the key values themselves — mainly to confirm whether an env var
-// change on the hosting platform actually took effect after a redeploy,
-// which otherwise requires reading server logs.
+// exposing the key value itself — mainly to confirm whether an env var
+// change on the hosting platform actually took effect after a redeploy.
 export async function GET() {
   return NextResponse.json({
-    xfyunConfigured: xfyunConfigured(),
-    // Named individually so a partially-configured deployment shows exactly
-    // which of the three values is missing, without exposing any of them.
-    xfyunAppId: Boolean(process.env.XFYUN_APP_ID),
-    xfyunApiKey: Boolean(process.env.XFYUN_API_KEY),
-    xfyunApiSecret: Boolean(process.env.XFYUN_API_SECRET),
+    dashscopeConfigured: Boolean(process.env.DASHSCOPE_API_KEY),
+    provider: 'dashscope',
+    sttModel: 'qwen3-asr-flash',
   });
 }
 
 // Hosting platforms commonly put a reverse proxy/gateway in front of the app
 // that sanitizes any 5xx response — replacing the body (observed in practice
-// as an empty `{}`) before it reaches the browser, to avoid leaking upstream
-// error details. That silently destroyed every diagnostic this route adds.
-// A 2xx body is essentially never rewritten this way, so every response
-// here — success or failure — uses status 200 and signals failure with an
-// `error` field in the JSON body instead of the HTTP status code.
+// as an empty `{}`) before it reaches the browser. A 2xx body is essentially
+// never rewritten this way, so every response here — success or failure —
+// uses status 200 and signals failure with an `error` field in the JSON body.
 export async function POST(request: NextRequest) {
   try {
     const formData = await request.formData();
@@ -36,64 +27,46 @@ export async function POST(request: NextRequest) {
     }
 
     // Check if audio is empty or too small (less than 1KB = likely no voice).
-    // Tagged with `stage: 'local-size-check'` so this is distinguishable from
-    // a provider-side "empty transcript" response further down — this one
-    // never even reaches iFlytek, so a configured API key is irrelevant here.
     if (audioBlob.size < 1024) {
       return NextResponse.json({
-        error: 'We couldn\'t detect your voice. Please try again.',
+        error: "We couldn't detect your voice. Please try again.",
         stage: 'local-size-check',
         audioBytes: audioBlob.size,
       });
     }
 
-    // iFlytek (讯飞) is the only real provider here. Groq and OpenAI
-    // Whisper were tried first but are unreachable from this app's hosting
-    // network — Groq returned a bare 403 "Forbidden" with no detail, which
-    // is what an IP/region-level block looks like, and it reproduced with a
-    // valid key, a fresh key, and every request shape tried. That code path
-    // is gone rather than left as dead weight; git history has it if a
-    // future deployment lives somewhere those services are reachable.
-    //
-    // It needs raw 16 kHz mono PCM, which the client converts to before
-    // uploading (src/lib/audio/pcm.ts) since the server has no ffmpeg.
-    if (xfyunConfigured()) {
-      const pcm = Buffer.from(await audioBlob.arrayBuffer());
-      const astResult = await transcribeWithXfyunAst(pcm);
-      if ('transcript' in astResult) {
-        return NextResponse.json({ transcript: astResult.transcript });
-      }
+    // Max audio size: 25MB (Qwen3-ASR-Flash limit is ~20MB, leave margin)
+    const MAX_AUDIO_BYTES = 25 * 1024 * 1024;
+    if (audioBlob.size > MAX_AUDIO_BYTES) {
       return NextResponse.json({
-        error: astResult.error,
-        stage: astResult.stage,
-        provider: 'xfyun-ast',
-        providerDetail: astResult.detail,
-        raw: astResult.raw,
+        error: 'Audio file is too large. Please record a shorter answer.',
+        stage: 'local-size-check',
+        audioBytes: audioBlob.size,
+        maxBytes: MAX_AUDIO_BYTES,
       });
     }
 
-    // No credentials configured — return mock data so the rest of the app
-    // (evaluation, practice, final comparison) stays developable locally
-    // without any account. Flagged `mock: true` so it can never be mistaken
-    // for a real transcription.
-    const mockTranscripts = [
-      "I think technology has definitely made our lives more complex in some ways, but also simpler in others. For example, smartphones allow us to access information instantly, which is convenient, but they also create expectations of constant connectivity.",
-      "I believe the government should balance both priorities. Space exploration drives innovation and inspires future generations, but we can't ignore pressing problems like climate change and poverty that need immediate attention.",
-      "Communication has changed dramatically over the past few decades. The internet and social media have made it possible to connect with anyone anywhere, but I think we've lost some of the depth that comes from face-to-face interaction.",
-    ];
+    // Qwen3-ASR-Flash accepts audio in any common format (webm, mp4, ogg, wav).
+    // No PCM conversion needed — the model handles container/codec decoding.
+    const audioBuffer = Buffer.from(await audioBlob.arrayBuffer());
+    const mimeType = audioBlob.type || 'audio/webm';
 
-    // Simulate API delay
-    await new Promise(resolve => setTimeout(resolve, 1500));
+    const result = await transcribeAudio(audioBuffer, mimeType);
 
-    const randomIndex = Math.floor(Math.random() * mockTranscripts.length);
+    if ('transcript' in result) {
+      return NextResponse.json({ transcript: result.transcript });
+    }
+
     return NextResponse.json({
-      transcript: mockTranscripts[randomIndex],
-      mock: true,
+      error: result.error,
+      stage: result.stage,
+      provider: 'qwen3-asr-flash',
+      detail: result.detail,
     });
   } catch (error) {
     console.error('STT error:', error);
     return NextResponse.json({
-      error: 'We couldn\'t process your answer. Please try again.',
+      error: "We couldn't process your answer. Please try again.",
       stage: 'unhandled-exception',
       detail: error instanceof Error ? error.message : String(error),
     });
