@@ -163,3 +163,6 @@ Desktop.ini
 # Misc
 .coze-logs
 .codegraph/
+
+# TTS voice probe output (scripts/try-voices.mjs)
+tts-samples/
