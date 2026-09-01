@@ -21,21 +21,12 @@ interface PracticeQuestion {
   contextHint: string;
 }
 
-interface PracticeFeedback {
-  positive: string;
-  improve: string;
-  tryNext: string;
-}
-
 type Phase =
   | 'loading'
   | 'intro'
   | 'question'
   | 'recording'
-  | 'feedback'
   | 'finished';
-
-type ProcessingStage = 'idle' | 'recording' | 'stt' | 'feedback';
 
 // Seconds the question stays on screen before recording starts
 const READING_SECONDS = 6;
@@ -87,30 +78,6 @@ async function transcribeAudio(blob: Blob | null): Promise<string> {
   }
 }
 
-// Fetch practice feedback from the API
-async function fetchPracticeFeedback(params: {
-  question: string;
-  answer: string;
-  weakness?: string;
-  improvementFocus?: string;
-}): Promise<PracticeFeedback | null> {
-  try {
-    const res = await fetch('/api/practice-feedback', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(params),
-    });
-    const data = await res.json();
-    if (data.positive && data.improve && data.tryNext) {
-      return { positive: data.positive, improve: data.improve, tryNext: data.tryNext };
-    }
-    return null;
-  } catch (err) {
-    console.error('Failed to fetch practice feedback:', err);
-    return null;
-  }
-}
-
 // Fetch TTS audio URL.
 // The gender is passed through exactly as the roster spells it ('Male' /
 // 'Female'): /api/tts looks it up in a case-sensitive voice map, so lower-
@@ -144,9 +111,10 @@ export default function PracticePage() {
   const [isFinalizing, setIsFinalizing] = useState(false);
   const [readCountdown, setReadCountdown] = useState(READING_SECONDS);
   const [elapsed, setElapsed] = useState(0);
-  const [processingStage, setProcessingStage] = useState<ProcessingStage>('idle');
-  const [feedback, setFeedback] = useState<PracticeFeedback | null>(null);
-  const [lastAnswer, setLastAnswer] = useState<string>('');
+  // True from the moment "Finish Answer" is clicked until the next question is
+  // on screen. isProcessingRef is the synchronous re-entry guard against a
+  // double click; this mirrors it for rendering.
+  const [isSavingAnswer, setIsSavingAnswer] = useState(false);
 
   // TTS state
   const [ttsAudioUrl, setTtsAudioUrl] = useState<string | null>(null);
@@ -171,16 +139,9 @@ export default function PracticePage() {
 
   // Race condition protection
   const hasLoadedQuestionsRef = useRef(false);
-  const feedbackSeqRef = useRef(0);
   const isProcessingRef = useRef(false);
 
   const question = questions[currentQ];
-
-  // Evaluation data for feedback personalization
-  const [evaluationData, setEvaluationData] = useState<{
-    weakness?: string;
-    improvementFocus?: string;
-  }>({});
 
   // Fetch targeted practice questions based on evaluation results
   useEffect(() => {
@@ -209,7 +170,6 @@ export default function PracticePage() {
           const stored = localStorage.getItem('speakloop_last_evaluation');
           if (stored) {
             evalData = JSON.parse(stored);
-            setEvaluationData({ weakness: evalData.weakness, improvementFocus: evalData.improvementFocus });
           }
         } catch {
           // No evaluation data available
@@ -455,7 +415,7 @@ export default function PracticePage() {
   // Preload the next question while the student answers this one, so the
   // examiner can speak the moment they move on
   useEffect(() => {
-    if (phase !== 'recording' && phase !== 'feedback') return;
+    if (phase !== 'recording') return;
     const nextQ = currentQ + 1;
     if (nextQ >= questions.length) return;
     preloadTts(questions[nextQ].question, nextQ);
@@ -500,88 +460,47 @@ export default function PracticePage() {
     }
   }, [currentQ, questions.length]);
 
-  // Process answer: STT -> Feedback
-  const processAnswer = useCallback(async (answerText: string, questionText: string) => {
-    const seq = ++feedbackSeqRef.current;
-
-    // STT is already done at this point, answerText is the transcript
-    // Now get feedback
-    setProcessingStage('feedback');
-
-    const feedbackResult = await fetchPracticeFeedback({
-      question: questionText,
-      answer: answerText,
-      weakness: evaluationData.weakness,
-      improvementFocus: evaluationData.improvementFocus,
-    });
-
-    // Check if this is still the current request (race condition protection)
-    if (feedbackSeqRef.current !== seq) return;
-
-    if (feedbackResult) {
-      setFeedback(feedbackResult);
-      setLastAnswer(answerText);
-      setPhase('feedback');
-    } else {
-      // Feedback failed — the answer is still recorded, so move on rather
-      // than stranding the student on a screen with nothing to read.
-      goToNextQuestion();
-    }
-
-    setProcessingStage('idle');
-  }, [evaluationData, goToNextQuestion]);
-
-  // Finish the answer: stop recording, transcribe, then ask for feedback.
-  // Unlike the interview, transcription has to finish here — the feedback is
-  // written against what the student actually said.
+  // Finish the answer: stop recording, bank it, move on. Transcription runs in
+  // the background — nothing in the practice session reads it, and
+  // handleGoToFinalEvaluation waits for whatever is still in flight before the
+  // final page analyses the answers.
   const finishAnswer = useCallback(async () => {
     if (isStopping || isProcessingRef.current || questions.length === 0) return;
     isProcessingRef.current = true;
+    setIsSavingAnswer(true);
     setIsStopping(true);
     setIsRecording(false);
-    setProcessingStage('recording');
 
-    const audioBlob = await stopAndCollectAudio();
-    setElapsed(0);
+    try {
+      const audioBlob = await stopAndCollectAudio();
+      setElapsed(0);
+      setIsStopping(false);
 
-    const questionText = questions[currentQ].question;
+      // Reserve this answer's place in question order now; the transcript is
+      // patched in when speech-to-text comes back.
+      const index = addPracticeTranscript({
+        question: questions[currentQ].question,
+        questionType: 'main',
+        answer: '',
+      });
 
-    // Save transcript placeholder
-    const index = addPracticeTranscript({
-      question: questionText,
-      questionType: 'main',
-      answer: '',
-    });
+      pendingTranscriptionsRef.current.push(
+        transcribeAudio(audioBlob).then((transcript) => {
+          updatePracticeTranscriptAnswer(index, transcript);
+        })
+      );
 
-    // Transcribe audio
-    setProcessingStage('stt');
-    const transcript = await transcribeAudio(audioBlob);
-    updatePracticeTranscriptAnswer(index, transcript);
-    pendingTranscriptionsRef.current.push(Promise.resolve());
-
-    // Process feedback
-    await processAnswer(transcript, questionText);
-
-    setIsStopping(false);
-    isProcessingRef.current = false;
-  }, [currentQ, isStopping, questions, stopAndCollectAudio, processAnswer]);
+      goToNextQuestion();
+    } catch (err) {
+      console.error('finishAnswer failed:', err);
+      setIsStopping(false);
+    } finally {
+      setIsSavingAnswer(false);
+      isProcessingRef.current = false;
+    }
+  }, [currentQ, isStopping, questions, stopAndCollectAudio, goToNextQuestion]);
 
   const handleFinishAnswer = () => finishAnswer();
-
-  // Answer the same question again after reading the feedback
-  const handleRetry = () => {
-    setFeedback(null);
-    setLastAnswer('');
-    setReadCountdown(READING_SECONDS);
-    setPhase('question');
-  };
-
-  // Continue to the next question after feedback
-  const handleContinue = () => {
-    setFeedback(null);
-    setLastAnswer('');
-    goToNextQuestion();
-  };
 
   // "Start Answering Now" — cut the examiner off and take the turn. Stopping
   // the audio matters: left playing, the examiner's voice would carry on into
@@ -604,20 +523,6 @@ export default function PracticePage() {
       setIsFinalizing(false);
     }
     router.push('/final-evaluation');
-  };
-
-  // Get status text based on processing stage
-  const getStatusText = () => {
-    switch (processingStage) {
-      case 'recording':
-        return 'Processing your answer...';
-      case 'stt':
-        return 'Transcribing your answer...';
-      case 'feedback':
-        return 'Preparing feedback...';
-      default:
-        return '';
-    }
   };
 
   return (
@@ -718,11 +623,12 @@ export default function PracticePage() {
                   </div>
                   <div>
                     <h3 className="mb-1 font-semibold text-slate-900">
-                      Get Instant Feedback
+                      Feedback Comes at the End
                     </h3>
                     <p className="text-sm leading-relaxed text-slate-600">
-                      After each answer, you&apos;ll receive focused feedback and can retry to improve.
-                      The examiner will also speak the questions aloud.
+                      The examiner asks each question aloud and you answer straight through, with no
+                      interruptions. Your feedback is written once all three answers are in, on the
+                      final evaluation page, where it compares this session with your first interview.
                     </p>
                   </div>
                 </div>
@@ -734,88 +640,6 @@ export default function PracticePage() {
                 className="rounded-xl bg-[#DA291C] px-10 py-3.5 text-base font-semibold text-white shadow-lg shadow-[#DA291C]/20 transition-all hover:bg-[#B91C1C] hover:shadow-xl"
               >
                 Start Practice →
-              </button>
-            </div>
-          </div>
-        )}
-
-        {/* Feedback Phase */}
-        {phase === 'feedback' && feedback && (
-          <div className="max-w-2xl mx-auto space-y-6">
-            {/* Practice Focus Badge */}
-            <div className="flex items-center justify-center">
-              <div className="rounded-full bg-amber-500/10 px-4 py-1.5">
-                <span className="text-sm font-medium text-amber-700">
-                  Practice Focus: {evaluationData.weakness || 'General Improvement'}
-                </span>
-              </div>
-            </div>
-
-            {/* Feedback Card */}
-            <div className="rounded-2xl border border-slate-100 bg-white p-6 shadow-sm">
-              <h3 className="text-lg font-semibold text-slate-900 mb-4">Feedback</h3>
-
-              <div className="space-y-4">
-                {/* Positive */}
-                <div className="rounded-xl bg-emerald-50 border border-emerald-100 p-4">
-                  <div className="flex items-start gap-3">
-                    <div className="flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-full bg-emerald-500 text-white mt-0.5">
-                      <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}>
-                        <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
-                      </svg>
-                    </div>
-                    <div>
-                      <p className="text-xs font-semibold text-emerald-700 mb-1">What went well</p>
-                      <p className="text-sm text-emerald-800">{feedback.positive}</p>
-                    </div>
-                  </div>
-                </div>
-
-                {/* Improve */}
-                <div className="rounded-xl bg-amber-50 border border-amber-100 p-4">
-                  <div className="flex items-start gap-3">
-                    <div className="flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-full bg-amber-500 text-white mt-0.5">
-                      <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}>
-                        <path strokeLinecap="round" strokeLinejoin="round" d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
-                      </svg>
-                    </div>
-                    <div>
-                      <p className="text-xs font-semibold text-amber-700 mb-1">One thing to improve</p>
-                      <p className="text-sm text-amber-800">{feedback.improve}</p>
-                    </div>
-                  </div>
-                </div>
-
-                {/* Try Next */}
-                <div className="rounded-xl bg-blue-50 border border-blue-100 p-4">
-                  <div className="flex items-start gap-3">
-                    <div className="flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-full bg-blue-500 text-white mt-0.5">
-                      <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                        <path strokeLinecap="round" strokeLinejoin="round" d="M13 7l5 5m0 0l-5 5m5-5H6" />
-                      </svg>
-                    </div>
-                    <div>
-                      <p className="text-xs font-semibold text-blue-700 mb-1">Try this next</p>
-                      <p className="text-sm text-blue-800">{feedback.tryNext}</p>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            {/* Action Buttons */}
-            <div className="flex gap-3 justify-center pt-2">
-              <button
-                onClick={handleRetry}
-                className="rounded-xl bg-slate-100 px-6 py-3 text-sm font-semibold text-slate-700 transition-all hover:bg-slate-200"
-              >
-                Try Again
-              </button>
-              <button
-                onClick={handleContinue}
-                className="rounded-xl bg-[#DA291C] px-6 py-3 text-sm font-semibold text-white shadow-lg shadow-[#DA291C]/20 transition-all hover:bg-[#B91C1C] hover:shadow-xl"
-              >
-                {currentQ < questions.length - 1 ? 'Next Question →' : 'Finish Practice'}
               </button>
             </div>
           </div>
@@ -857,10 +681,10 @@ export default function PracticePage() {
                     <span className="text-sm text-slate-500">Recording in progress...</span>
                   </>
                 )}
-                {processingStage !== 'idle' && (
-                  <span className="text-sm text-amber-600">{getStatusText()}</span>
+                {isSavingAnswer && (
+                  <span className="text-sm text-amber-600">Saving your answer…</span>
                 )}
-                {!isRecording && processingStage === 'idle' && phase === 'question' && (
+                {!isRecording && !isSavingAnswer && phase === 'question' && (
                   <span className="text-sm text-slate-400">Read the question…</span>
                 )}
               </div>
@@ -1022,10 +846,10 @@ export default function PracticePage() {
             ) : (
               <button
                 onClick={handleFinishAnswer}
-                disabled={isStopping || processingStage !== 'idle'}
+                disabled={isStopping || isSavingAnswer}
                 className="w-full py-3.5 bg-slate-800 text-white rounded-xl font-medium hover:bg-slate-700 transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
               >
-                {processingStage !== 'idle' ? getStatusText() : 'Finish Answer'}
+                {isSavingAnswer ? 'Saving your answer…' : 'Finish Answer'}
               </button>
             )}
           </div>

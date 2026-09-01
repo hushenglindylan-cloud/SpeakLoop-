@@ -51,6 +51,12 @@ async function chatCompletion<T = unknown>(params: {
   messages: Array<{ role: string; content: unknown }>;
   temperature?: number;
   responseFormat?: { type: 'json_object' };
+  /**
+   * Send `enable_thinking` with the request. Reasoning-capable Qwen models
+   * refuse a non-streaming call unless this is explicitly false — see llmChat.
+   * Left undefined for models that don't take the parameter at all.
+   */
+  enableThinking?: boolean;
   signal?: AbortSignal;
 }): Promise<T> {
   const apiKey = getApiKey();
@@ -66,6 +72,10 @@ async function chatCompletion<T = unknown>(params: {
 
   if (params.responseFormat) {
     body.response_format = params.responseFormat;
+  }
+
+  if (params.enableThinking !== undefined) {
+    body.enable_thinking = params.enableThinking;
   }
 
   // Retry logic for transient failures (5xx, network errors)
@@ -227,8 +237,16 @@ export interface LLMChatOptions {
 }
 
 /**
- * Call qwen3.5-flash for text generation tasks:
- * follow-up generation, evaluation, progress analysis, etc.
+ * Call qwen3.5-flash for text generation tasks: evaluation, practice question
+ * hints, progress analysis, etc.
+ *
+ * `enable_thinking: false` is not optional. qwen3.5-flash is reasoning-capable,
+ * and DashScope rejects a non-streaming call to such a model unless the
+ * parameter is explicitly false — with HTTP 400 "parameter.enable_thinking
+ * must be set to false for non-streaming calls". Without it every call here
+ * fails, and because each route falls back to canned text on failure, the app
+ * keeps working while quietly serving mock scores and mock feedback. If you
+ * ever want the model's reasoning, the request has to be streamed as well.
  */
 export async function llmChat(options: LLMChatOptions): Promise<string> {
   const {
@@ -259,6 +277,7 @@ export async function llmChat(options: LLMChatOptions): Promise<string> {
       ],
       temperature,
       responseFormat: jsonMode ? { type: 'json_object' } : undefined,
+      enableThinking: false,
       signal: timeoutController.signal,
     });
 

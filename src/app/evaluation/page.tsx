@@ -38,6 +38,8 @@ interface CoreEvaluationData {
   improvementFocus: string;
   mock?: boolean;
   fallback?: boolean;
+  /** Why the scorer fell back, e.g. 'llm-error', 'llm-timeout', 'parse-error'. */
+  fallbackStage?: string;
 }
 
 // Detailed evaluation — returned by Detailed Evaluation API
@@ -483,6 +485,15 @@ export default function EvaluationPage() {
           {coreEvaluation.mock && (
             <p className="mt-2 text-xs text-amber-600">
               Demo mode: Configure DASHSCOPE_API_KEY for AI-powered evaluation
+            </p>
+          )}
+          {/* The scorer failed and these are placeholder bands. Saying so
+              matters: identical canned text read as a real score is worse than
+              no score, and it is how a broken scorer goes unnoticed. */}
+          {!coreEvaluation.mock && coreEvaluation.fallback && (
+            <p className="mt-2 text-xs text-amber-600">
+              Placeholder scores — the AI scorer could not be reached
+              {coreEvaluation.fallbackStage ? ` (${coreEvaluation.fallbackStage})` : ''}. Try again later.
             </p>
           )}
         </div>

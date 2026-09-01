@@ -10,6 +10,14 @@ import { llmChat } from '@/lib/ai/provider';
  * Does NOT re-score the interview (uses existing evaluation data).
  * Does NOT generate fake band scores for practice.
  * Focuses on: What improved, What remains, Next step.
+ *
+ * This is the only feedback the student gets on their practice, so it never
+ * falls back to canned text the way the scoring routes do — if the analysis
+ * cannot be produced, the page says so and offers a retry. Failures come back
+ * as HTTP 200 with `error`/`stage`/`detail` (the same shape /api/stt and
+ * /api/tts use): hosting gateways in front of the app have been observed
+ * replacing 5xx bodies before they reach the browser, and a reason the student
+ * can read is what makes the failure diagnosable at all.
  */
 export async function POST(request: NextRequest) {
   try {
@@ -21,7 +29,7 @@ export async function POST(request: NextRequest) {
       practiceFocus,
     } = body as {
       interviewTranscripts: Array<{ question: string; questionType: string; answer: string }>;
-      practiceTranscripts: Array<{ question: string; questionType: string; answer: string; retryCount?: number }>;
+      practiceTranscripts: Array<{ question: string; questionType: string; answer: string }>;
       coreEvaluation?: {
         scores: {
           fluencyCoherence: number;
@@ -40,10 +48,10 @@ export async function POST(request: NextRequest) {
     };
 
     if (!interviewTranscripts?.length || !practiceTranscripts?.length) {
-      return NextResponse.json(
-        { error: 'Both interview and practice transcripts are required' },
-        { status: 400 }
-      );
+      return NextResponse.json({
+        error: 'Both interview and practice transcripts are required',
+        stage: 'no-transcripts',
+      });
     }
 
     const apiKey = process.env.DASHSCOPE_API_KEY;
@@ -82,10 +90,11 @@ export async function POST(request: NextRequest) {
     return NextResponse.json(progressAnalysis);
   } catch (error) {
     console.error('Final evaluation error:', error);
-    return NextResponse.json(
-      { error: 'Failed to generate final evaluation' },
-      { status: 500 }
-    );
+    return NextResponse.json({
+      error: 'Could not analyse your progress.',
+      stage: 'progress-analysis-failed',
+      detail: error instanceof Error ? error.message : String(error),
+    });
   }
 }
 
@@ -112,7 +121,7 @@ interface ProgressAnalysis {
 
 async function analyzeProgress(
   interviewTranscripts: Array<{ question: string; questionType: string; answer: string }>,
-  practiceTranscripts: Array<{ question: string; questionType: string; answer: string; retryCount?: number }>,
+  practiceTranscripts: Array<{ question: string; questionType: string; answer: string }>,
   coreEvaluation?: {
     scores: {
       fluencyCoherence: number;
@@ -139,14 +148,12 @@ IMPORTANT PRINCIPLES:
 3. Do NOT claim "significant improvement" without clear evidence.
 4. Do NOT use Band 7+ language as the standard. "Slightly better" is the goal.
 5. Focus on: clearer, more specific, more accurate, more natural, slightly more varied.
-6. If the student retried a question, compare their first attempt with their final attempt.
-7. Be honest. If no clear improvement is visible, say so.
+6. Be honest. If no clear improvement is visible, say so.
 
 Look for observable changes:
 - Did vocabulary become more specific (not necessarily more complex)?
 - Did grammar become more accurate (not necessarily more complex)?
 - Did answers become more relevant and focused?
-- Did the student respond to feedback in their retries?
 
 Return ONLY a valid JSON object with this structure:
 {
@@ -176,10 +183,7 @@ If no clear improvement is observed, set "improved" to false and explain what st
     .join('\n\n');
 
   const practiceFormatted = practiceTranscripts
-    .map((t, i) => {
-      const retryInfo = t.retryCount ? ` [Retry ${t.retryCount}]` : '';
-      return `Practice Q${i + 1}${retryInfo}: ${t.question}\nA: ${t.answer}`;
-    })
+    .map((t, i) => `Practice Q${i + 1}: ${t.question}\nA: ${t.answer}`)
     .join('\n\n');
 
   // Include existing evaluation context
@@ -215,6 +219,9 @@ Analyze the student's progress. Focus on observable changes, not invented scores
     userPrompt,
     temperature: 0.3,
     jsonMode: true,
+    // Two full sessions of transcript in, a structured report out — the 30s
+    // default was tight enough to be its own failure mode.
+    timeoutMs: 60_000,
   });
 
   try {

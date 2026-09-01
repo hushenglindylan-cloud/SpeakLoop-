@@ -94,6 +94,9 @@ export default function FinalEvaluationPage() {
   const [progressAnalysis, setProgressAnalysis] = useState<ProgressAnalysis | null>(null);
   const [progressLoading, setProgressLoading] = useState(true);
   const [progressError, setProgressError] = useState<string | null>(null);
+  // What actually went wrong, when the server can say. Shown under the error so
+  // a failure is diagnosable from the page itself rather than from server logs.
+  const [progressErrorDetail, setProgressErrorDetail] = useState<string | null>(null);
 
   // Single-flight guard to prevent duplicate requests
   const hasRequestedRef = useRef(false);
@@ -197,6 +200,9 @@ export default function FinalEvaluationPage() {
 
         if (result.error) {
           setProgressError(result.error);
+          setProgressErrorDetail(
+            [result.stage, result.detail].filter(Boolean).join(' — ') || null
+          );
         } else {
           setProgressAnalysis(result);
         }
@@ -344,7 +350,12 @@ export default function FinalEvaluationPage() {
 
           {progressError && !progressLoading && (
             <div className="text-center py-8">
-              <p className="text-slate-600 mb-4">{progressError}</p>
+              <p className="text-slate-600 mb-2">{progressError}</p>
+              {progressErrorDetail && (
+                <p className="mx-auto mb-4 max-w-xl break-words text-xs text-slate-400">
+                  {progressErrorDetail}
+                </p>
+              )}
               <button
                 onClick={() => window.location.reload()}
                 className="rounded-lg bg-slate-100 px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-200 transition-colors"
