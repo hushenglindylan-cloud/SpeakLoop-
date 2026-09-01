@@ -8,6 +8,7 @@ import { ExaminerAvatar } from '@/components/examiner-avatar';
 import { getExaminerPortrait } from '@/lib/examiner-portraits';
 import { addPracticeTranscript, updatePracticeTranscriptAnswer, getSession, getUsedQuestionIds } from '@/lib/store/interview-session';
 import { examiners } from '@/lib/mock/data';
+import { SLOW_REPLAY_RATE, speechRateForDifficulty } from '@/lib/tts-voices';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -105,6 +106,9 @@ export default function PracticePage() {
   const [examinerPortrait, setExaminerPortrait] = useState<string>('');
   const [examinerName, setExaminerName] = useState<string>('');
   const [examinerGender, setExaminerGender] = useState<string | null>(null);
+  // Drives how fast the examiner speaks — see speechRateForDifficulty.
+  const [examinerDifficulty, setExaminerDifficulty] = useState<string | null>(null);
+  const speechRate = speechRateForDifficulty(examinerDifficulty);
   const [currentQ, setCurrentQ] = useState(0);
   const [isRecording, setIsRecording] = useState(false);
   const [isStopping, setIsStopping] = useState(false);
@@ -161,6 +165,7 @@ export default function PracticePage() {
         setExaminerName(examiner.name);
         // Verbatim — see fetchTtsAudio.
         setExaminerGender(examiner.gender);
+        setExaminerDifficulty(examiner.difficulty);
       }
 
       try {
@@ -278,11 +283,15 @@ export default function PracticePage() {
     setIsTtsPlaying(true);
     setSpeechStatus('playing');
     audio.src = audioUrl;
+    // Loading a new source resets playbackRate to defaultPlaybackRate, so set
+    // both — otherwise the rate would apply only until the next question.
+    audio.defaultPlaybackRate = speechRate;
+    audio.playbackRate = speechRate;
     audio.play().catch(() => {
       setIsTtsPlaying(false);
       fallbackToText();
     });
-  }, [examinerGender]);
+  }, [examinerGender, speechRate]);
 
   // Recording timer
   useEffect(() => {
@@ -501,6 +510,17 @@ export default function PracticePage() {
   }, [currentQ, isStopping, questions, stopAndCollectAudio, goToNextQuestion]);
 
   const handleFinishAnswer = () => finishAnswer();
+
+  // "Didn't catch that?" — replay the question. The slow replay is a listening
+  // aid for a question that was missed, so it only affects this playback: the
+  // next question is spoken at the examiner's own rate again.
+  const replayQuestion = (rate: number) => {
+    const audio = questionAudioRef.current;
+    if (!audio) return;
+    audio.currentTime = 0;
+    audio.playbackRate = rate;
+    audio.play().catch((err) => console.error('Replay failed:', err));
+  };
 
   // "Start Answering Now" — cut the examiner off and take the turn. Stopping
   // the audio matters: left playing, the examiner's voice would carry on into
@@ -777,16 +797,17 @@ export default function PracticePage() {
                       {ttsAudioUrl && (
                         <>
                           <button
-                            onClick={() => {
-                              const audio = questionAudioRef.current;
-                              if (audio) {
-                                audio.currentTime = 0;
-                                audio.play().catch((err) => console.error('Replay failed:', err));
-                              }
-                            }}
+                            onClick={() => replayQuestion(speechRate)}
                             className="text-[#DA291C] font-medium hover:underline"
                           >
                             Play again
+                          </button>
+                          {' · '}
+                          <button
+                            onClick={() => replayQuestion(SLOW_REPLAY_RATE)}
+                            className="text-[#DA291C] font-medium hover:underline"
+                          >
+                            Play slower
                           </button>
                           {' · '}
                         </>

@@ -69,3 +69,47 @@ export function voiceForExaminer(gender: string): string | undefined {
 export function isExaminerSupported(examiner: { gender: string }): boolean {
   return Boolean(voiceForExaminer(examiner.gender));
 }
+
+// ---------------------------------------------------------------------------
+// How fast the examiner speaks
+// ---------------------------------------------------------------------------
+
+/**
+ * Playback rate per examiner difficulty.
+ *
+ * A real Part 3 examiner reads from a prompt card: deliberate, clear, and
+ * closer to slow than to fast. The difficulty of this exam lives in the
+ * question bank — every question is drawn at the level the student chose —
+ * so speed is a scaffold for the students who need one, never the thing that
+ * makes an interview hard. That is why even the top tier stays a shade under
+ * 1.0: nothing here should be faster than a real examiner.
+ *
+ * These are applied as `HTMLMediaElement.playbackRate` rather than asked of
+ * the synthesiser. The browser preserves pitch (`preservesPitch` defaults to
+ * true), so the examiner sounds like the same person speaking more slowly,
+ * the already-preloaded audio needs no re-synthesis, and an unsupported
+ * synthesis parameter can't leave the examiner silent.
+ */
+const RATE_BY_DIFFICULTY: Record<string, number> = {
+  Easy: 0.85,
+  Standard: 0.92,
+  Challenging: 0.98,
+};
+
+/** Used when the difficulty is unknown — the middle tier, not full speed. */
+const DEFAULT_SPEECH_RATE = RATE_BY_DIFFICULTY.Standard;
+
+/**
+ * The rate offered by "Play slower": for a student who missed the question,
+ * not for how it is asked in the first place.
+ */
+export const SLOW_REPLAY_RATE = 0.75;
+
+/** How fast this examiner speaks. Case-insensitive, like voiceForExaminer. */
+export function speechRateForDifficulty(difficulty: string | null | undefined): number {
+  if (!difficulty) return DEFAULT_SPEECH_RATE;
+  const match = Object.keys(RATE_BY_DIFFICULTY).find(
+    (key) => key.toLowerCase() === difficulty.trim().toLowerCase()
+  );
+  return match ? RATE_BY_DIFFICULTY[match] : DEFAULT_SPEECH_RATE;
+}

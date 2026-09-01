@@ -8,6 +8,7 @@ import { ExaminerAvatar } from '@/components/examiner-avatar';
 import { getExaminerPortrait } from '@/lib/examiner-portraits';
 import { addTranscript, updateTranscriptAnswer, getSession, addUsedQuestionIds } from '@/lib/store/interview-session';
 import { examiners } from '@/lib/mock/data';
+import { SLOW_REPLAY_RATE, speechRateForDifficulty } from '@/lib/tts-voices';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -127,6 +128,9 @@ export default function InterviewPage() {
   const [speechStatus, setSpeechStatus] = useState<'idle' | 'loading' | 'playing' | 'unavailable'>('idle');
   const [showQuestionText, setShowQuestionText] = useState(false);
   const [examinerGender, setExaminerGender] = useState<string | null>(null);
+  // Drives how fast the examiner speaks — see speechRateForDifficulty.
+  const [examinerDifficulty, setExaminerDifficulty] = useState<string | null>(null);
+  const speechRate = speechRateForDifficulty(examinerDifficulty);
   const questionAudioRef = useRef<HTMLAudioElement | null>(null);
   // Whether audio is loaded for the current question, so "Play again" is only
   // offered when there is something to replay. State, not a ref: the button's
@@ -165,6 +169,7 @@ export default function InterviewPage() {
         setExaminerName(examiner.name);
         // The voice is chosen server-side from the examiner's gender.
         setExaminerGender(examiner.gender);
+        setExaminerDifficulty(examiner.difficulty);
       }
       const excludeIds: string[] = [];
 
@@ -346,6 +351,10 @@ export default function InterviewPage() {
 
         setHasPlayableAudio(true);
         audio.src = cachedAudioUrl;
+        // Loading a new source resets playbackRate to defaultPlaybackRate, so
+        // set both — otherwise the rate would apply only until the next question.
+        audio.defaultPlaybackRate = speechRate;
+        audio.playbackRate = speechRate;
         setSpeechStatus('playing');
         await audio.play();
         return;
@@ -375,6 +384,8 @@ export default function InterviewPage() {
 
         setHasPlayableAudio(true);
         audio.src = data.audioUrl;
+        audio.defaultPlaybackRate = speechRate;
+        audio.playbackRate = speechRate;
         setSpeechStatus('playing');
         await audio.play();
       } catch (err) {
@@ -384,7 +395,7 @@ export default function InterviewPage() {
         fallbackToText();
       }
     },
-    [examinerGender]
+    [examinerGender, speechRate]
   );
 
   const playQuestionAndRecord = useCallback(() => {
@@ -533,12 +544,19 @@ export default function InterviewPage() {
   };
 
   // "Didn't catch that?" — replay the examiner's audio, or reveal the text.
-  const handleReplayQuestion = () => {
+  // The slow replay is a listening aid for a question that was missed, so it
+  // only affects this playback: the next question is spoken at the examiner's
+  // own rate again.
+  const replayQuestion = (rate: number) => {
     const audio = questionAudioRef.current;
     if (!audio || !hasPlayableAudio) return;
     audio.currentTime = 0;
+    audio.playbackRate = rate;
     audio.play().catch((err) => console.error('Replay failed:', err));
   };
+
+  const handleReplayQuestion = () => replayQuestion(speechRate);
+  const handleReplaySlowly = () => replayQuestion(SLOW_REPLAY_RATE);
 
   const handleViewQuestionText = () => {
     setShowQuestionText(true);
@@ -743,6 +761,10 @@ export default function InterviewPage() {
                     <>
                       <button onClick={handleReplayQuestion} className="text-[#DA291C] font-medium hover:underline">
                         Play again
+                      </button>
+                      {' · '}
+                      <button onClick={handleReplaySlowly} className="text-[#DA291C] font-medium hover:underline">
+                        Play slower
                       </button>
                       {' · '}
                     </>
